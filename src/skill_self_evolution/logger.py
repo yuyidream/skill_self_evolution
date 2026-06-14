@@ -1,19 +1,18 @@
 """
-JSONL 日志器 — 追加写入 Skill 执行日志，Pydantic 校验。
+JSONL 日志器 — 使用 loguru 结构化日志 + Pydantic 校验。
 
 日志路径: /data/skill-logs/{skill_name}/{date}.jsonl
 （可通过 SKILL_LOG_DIR 环境变量覆盖）
 """
 
 import json
-import logging
 import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from skill_self_evolution.models import LogEntry
+from loguru import logger
 
-logger = logging.getLogger(__name__)
+from skill_self_evolution.models import LogEntry
 
 _BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -52,8 +51,8 @@ class SkillLogger:
         try:
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except Exception as e:
-            logger.warning("Skill 日志写入失败: %s", e)
+        except OSError as e:
+            logger.warning("Skill 日志写入失败: {}", e)
 
     def log_execution(
         self,

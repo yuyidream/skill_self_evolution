@@ -4,7 +4,7 @@ DeepSeek 客户端封装 — 超时/重试/熔断，兼容 OpenAI Chat Completio
 
 import asyncio
 import json
-import logging
+from loguru import logger
 import time
 from typing import Any
 
@@ -12,8 +12,6 @@ import httpx
 
 from skill_self_evolution.config import get_deepseek_config
 from skill_self_evolution.models import DeepSeekChatResponse
-
-logger = logging.getLogger(__name__)
 
 
 class CircuitBreaker:

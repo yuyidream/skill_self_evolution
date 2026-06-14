@@ -44,8 +44,8 @@ class AiReselectionResult(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    result: str = Field(
-        ..., description="Reselected value, or '\u4e0d\u5408\u7406' if still unreasonable"
+    result: Any = Field(
+        ..., description="Reselected value (dict / str), or '\u4e0d\u5408\u7406' if still unreasonable"
     )
     reason: str = Field(default="", description="AI reasoning (max 500 chars)")
 

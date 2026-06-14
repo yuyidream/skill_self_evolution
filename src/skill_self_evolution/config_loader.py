@@ -9,8 +9,11 @@
 housekeeping 项目的 VersionManager 可作为适配器实现同一接口。
 """
 
-import logging
-from datetime import datetime
+from loguru import logger
+from datetime import datetime, timezone, timedelta
+
+_BEIJING_TZ = timezone(timedelta(hours=8))
+
 from typing import Any
 
 import pymysql
@@ -19,8 +22,6 @@ from ruamel.yaml import YAML
 yaml_safe = YAML(typ='safe')
 
 from skill_self_evolution.config import DbConfig, get_db_config
-
-logger = logging.getLogger(__name__)
 
 
 class ConfigVersionManager:
@@ -97,11 +98,11 @@ class ConfigVersionManager:
 
     def load(self, skill_name: str, config_type: str) -> dict | None:
         """从 MySQL 加载当前激活版本，返回解析后的 dict。
-        
+
         Args:
             skill_name: Skill 名称（如 "nickname-selector"）
             config_type: "rules_config" 或 "prompt"
-        
+
         Returns:
             解析后的 YAML dict，未找到配置时返回 None
         """
@@ -162,7 +163,7 @@ class ConfigVersionManager:
                 cur.execute(
                     "UPDATE skill_config SET content = %s, version = %s, updated_at = %s "
                     "WHERE skill_name = %s AND config_type = %s",
-                    (content, new_version, datetime.now(), skill_name, config_type),
+                    (content, new_version, datetime.now(_BEIJING_TZ), skill_name, config_type),
                 )
             else:
                 new_version = 1
@@ -230,7 +231,7 @@ class ConfigVersionManager:
             cur.execute(
                 "REPLACE INTO skill_config (skill_name, config_type, content, version, updated_at) "
                 "VALUES (%s, %s, %s, %s, %s)",
-                (skill_name, config_type, hist[0], new_version, datetime.now()),
+                (skill_name, config_type, hist[0], new_version, datetime.now(_BEIJING_TZ)),
             )
 
         logger.info("配置回滚成功: %s/%s → v%d (from history v%d)", skill_name, config_type, new_version, target_version)

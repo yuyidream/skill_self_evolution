@@ -12,12 +12,16 @@ dependencies = [
     "ruamel.yaml>=0.18",
     "httpx>=0.25",
     "pymysql>=1.1",
+    "loguru>=0.7",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+]
+lint = [
+    "ryl>=0.10",
 ]
 
 [tool.setuptools]

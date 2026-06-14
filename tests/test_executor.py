@@ -19,7 +19,7 @@ import pytest
 
 from skill_self_evolution.executor import SkillExecutor
 from skill_self_evolution.fallback import FallbackConfig
-from skill_self_evolution.models import SkillInput, SkillOutput
+from skill_self_evolution.models import SkillInput, SkillOutput, AiValidationResult, AiReselectionResult
 
 
 class TestSkillExecutor:
@@ -124,7 +124,7 @@ class TestIsFailureComputation:
         result = SkillExecutor._compute_is_failure(
             "enhancement",
             SkillOutput(source="rule", result={"score": 0}),
-            {"result": "不合理"},
+            AiValidationResult(result="不合理", reason="test"),
             None,
         )
         assert result is False
@@ -134,7 +134,7 @@ class TestIsFailureComputation:
         result = SkillExecutor._compute_is_failure(
             "correction",
             SkillOutput(source="rule", result={"nickname": "test"}),
-            {"result": "不合理"},
+            AiValidationResult(result="不合理", reason=""),
             None,
         )
         assert result is True
@@ -144,7 +144,7 @@ class TestIsFailureComputation:
         result = SkillExecutor._compute_is_failure(
             "correction",
             SkillOutput(source="rule", result={"nickname": "test"}),
-            {"result": "合理"},
+            AiValidationResult(result="合理", reason=""),
             None,
         )
         assert result is False
@@ -154,7 +154,7 @@ class TestIsFailureComputation:
         result = SkillExecutor._compute_is_failure(
             "correction",
             SkillOutput(source="rule", result={"nickname": "test"}),
-            {"result": "不合理"},
-            {"result": "不合理"},
+            AiValidationResult(result="不合理", reason=""),
+            AiReselectionResult(result="不合理", reason=""),
         )
         assert result is True

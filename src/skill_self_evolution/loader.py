@@ -3,7 +3,7 @@ Skill 动态加载器 — 加载 run.py / summarize_input / evolve.toml / evolve
 """
 
 import importlib.util
-import logging
+from loguru import logger
 import os
 from pathlib import Path
 from typing import Any, Callable
@@ -12,8 +12,6 @@ from ruamel.yaml import YAML
 
 yaml_safe = YAML(typ='safe')
 yaml_rt = YAML()  # round-trip mode — 保留注释和格式，用于 dump
-
-logger = logging.getLogger(__name__)
 
 # Skill 根目录：优先 SKILL_BASE_DIR 环境变量；兼容 housekeeping 的路径
 _skill_base_env = os.getenv("SKILL_BASE_DIR", "")

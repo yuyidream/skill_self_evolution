@@ -10,15 +10,13 @@ AI 降级策略 — 乐观/保守模式 + 熔断检查。
 - warnings → 仅用于日志和监控，不阻断流程
 """
 
-import logging
+from loguru import logger
 from dataclasses import dataclass, field
 from enum import Enum
 
 from pydantic import BaseModel, Field
 
 from skill_self_evolution.deepseek import CircuitBreaker
-
-logger = logging.getLogger(__name__)
 
 
 class FallbackMode(str, Enum):

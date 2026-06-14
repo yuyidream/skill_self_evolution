@@ -1,0 +1,51 @@
+# ryl YAML linter configuration — default preset expanded as TOML
+# https://ryl-docs.pages.dev/
+
+[files]
+yaml = ["*.yaml", "*.yml"]
+
+[rules]
+anchors = "enable"
+braces = "enable"
+brackets = "enable"
+colons = "enable"
+commas = "enable"
+document-end = "disable"
+document-start = "disable"
+empty-values = "disable"
+float-values = "disable"
+hyphens = "enable"
+key-duplicates = "enable"
+key-ordering = "disable"
+new-line-at-end-of-file = "enable"
+octal-values = "disable"
+quoted-strings = "disable"
+trailing-spaces = "enable"
+
+# New lines: enforce Unix LF (project standard)
+[rules.new-lines]
+type = "unix"
+
+# Line length: YAML config 可能含长模板字符串，放宽到 200
+[rules.line-length]
+max = 200
+allow-non-breakable-words = true
+level = "warning"
+
+# Truthy: YAML 1.2 only, true/false/TRUE/FALSE
+[rules.truthy]
+allowed-values = ["true", "false", "TRUE", "FALSE"]
+
+# Indentation: 2 spaces
+[rules.indentation]
+spaces = 2
+indent-sequences = true
+
+# Empty lines: max 1 at end of file
+[rules.empty-lines]
+max = 1
+max-end = 1
+
+# Fix: apply all safe fixes
+[fix]
+fixable = ["ALL"]

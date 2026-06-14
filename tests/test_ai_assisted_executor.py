@@ -4,7 +4,7 @@ AiAssistedExecutor 基类测试：correction / enhancement 流程
 
 import pytest
 
-from skill_self_evolution.models import SkillInput, SkillOutput
+from skill_self_evolution.models import SkillInput, SkillOutput, AiValidationResult, AiReselectionResult
 from skill_self_evolution.fallback import FallbackConfig, FallbackStrategy
 from skill_self_evolution.deepseek import CircuitBreaker
 from skill_self_evolution.ai_assisted_executor import AiAssistedExecutor
@@ -13,24 +13,24 @@ from skill_self_evolution.ai_assisted_executor import AiAssistedExecutor
 class MockCorrectionExecutor(AiAssistedExecutor):
     """模拟 correction 角色执行器"""
 
-    async def ai_validate(self, skill_input, rule_output, prompt_config) -> dict:
+    async def ai_validate(self, skill_input, rule_output, prompt_config) -> AiValidationResult:
         nickname = rule_output.result.get("nickname", "")
         if nickname == "阿姨派单群":
-            return {"result": "不合理", "reason": "这是群名不是人名"}
-        return {"result": "合理", "reason": "看起来像真实昵称"}
+            return AiValidationResult(result="不合理", reason="这是群名不是人名")
+        return AiValidationResult(result="合理", reason="看起来像真实昵称")
 
-    async def ai_reselect(self, skill_input, rule_output, prompt_config) -> dict:
-        return {"result": {"nickname": "张三"}, "source": "ai"}
+    async def ai_reselect(self, skill_input, rule_output, prompt_config) -> AiReselectionResult:
+        return AiReselectionResult(result={"nickname": "张三"}, reason="")
 
 
 class MockEnhancementExecutor(AiAssistedExecutor):
     """模拟 enhancement 角色执行器"""
 
-    async def ai_validate(self, skill_input, rule_output, prompt_config) -> dict:
-        return {"result": "合理"}
+    async def ai_validate(self, skill_input, rule_output, prompt_config) -> AiValidationResult:
+        return AiValidationResult(result="合理", reason="")
 
-    async def ai_reselect(self, skill_input, rule_output, prompt_config) -> dict:
-        return {}
+    async def ai_reselect(self, skill_input, rule_output, prompt_config) -> AiReselectionResult:
+        return AiReselectionResult(result="合理", reason="")
 
     async def ai_enhance(self, skill_input, rule_output, prompt_config) -> dict:
         return {"semantic_score": 18}

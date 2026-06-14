@@ -14,7 +14,7 @@ EvoSkill 离线进化器 — 读 JSONL 日志 → DeepSeek 分析失败模式 �
 """
 
 import json
-import logging
+from loguru import logger
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -39,8 +39,7 @@ from skill_self_evolution.deepseek import DeepSeekClient
 from skill_self_evolution.loader import SkillLoader, SkillModule
 from skill_self_evolution.logger import _get_log_dir
 from skill_self_evolution.models import EvolveProposalModel
-
-logger = logging.getLogger(__name__)
+from skill_self_evolution.yaml_lint import lint_and_fix_yaml
 
 _BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -312,9 +311,15 @@ class Evolver:
 
             applied = True
             if proposal.rules_text and auto_cfg.get("rules_config", False):
+                proposal.rules_text, lint_errors = lint_and_fix_yaml(proposal.rules_text)
+                if lint_errors:
+                    logger.warning("EvoSkill [%s] rules_config lint issues: %s", self.skill_name, lint_errors)
                 self._version_mgr.save(self.skill_name, "rules_config", proposal.rules_text)
                 logger.info("EvoSkill [%s] rules_config 已写入 MySQL", self.skill_name)
             if proposal.prompt_text and auto_cfg.get("prompt", False):
+                proposal.prompt_text, lint_errors = lint_and_fix_yaml(proposal.prompt_text)
+                if lint_errors:
+                    logger.warning("EvoSkill [%s] prompt lint issues: %s", self.skill_name, lint_errors)
                 self._version_mgr.save(self.skill_name, "prompt", proposal.prompt_text)
                 logger.info("EvoSkill [%s] prompt 已写入 MySQL", self.skill_name)
 

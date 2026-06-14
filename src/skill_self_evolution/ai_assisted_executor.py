@@ -9,7 +9,7 @@ AiAssistedExecutor — 通用 AI 辅助执行基类。
 框架自动处理：降级、熔断、is_failure 计算、JSONL 日志。
 """
 
-import logging
+from loguru import logger
 import time
 from abc import ABC, abstractmethod
 from typing import Any
@@ -24,8 +24,6 @@ from skill_self_evolution.models import (
     SkillInput,
     SkillOutput,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class AiAssistedExecutor(ABC):
