@@ -96,11 +96,6 @@ class DeepSeekClient:
         max_tokens: int = 2048,
         timeout: float | None = None,
     ) -> DeepSeekResponse:
-        """发送非流式 chat 请求，支持自动重试。
-
-        Raises:
-            RuntimeError: 熔断器开启或所有重试均失败
-        """
         if self._circuit_breaker.is_open:
             raise RuntimeError("熔断器已开启，拒绝请求")
 
@@ -163,15 +158,21 @@ class DeepSeekClient:
         max_tokens: int = 2048,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        """发送请求并将响应解析为 JSON dict。解析失败时返回空 dict。"""
+        """发送请求并解析 JSON。支持 ```json...``` 包裹和纯文本 JSON。"""
         resp = await self.chat(messages, temperature, max_tokens, timeout)
         content = resp.content.strip()
-        # 尝试提取 JSON（可能包裹在 ```json ... ``` 中）
-        if content.startswith("```"):
-            lines = content.split("\n")
-            content = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            logger.warning("DeepSeek 响应非 JSON: %s", content[:200])
-            return {}
+
+        # 尝试提取 JSON：先尝试整体解析，再提取 markdown 代码块
+        for candidate in [content]:
+            if candidate.startswith("```"):
+                lines = candidate.split("\n")
+                end = -1 if lines[-1].strip() == "```" else len(lines)
+                start = 1 if lines[0].startswith("```json") or lines[0].startswith("```") else 0
+                candidate = "\n".join(lines[start:end])
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+
+        logger.warning("DeepSeek 响应非 JSON: %s", content[:200])
+        return {}

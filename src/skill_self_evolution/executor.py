@@ -297,25 +297,44 @@ class SkillExecutor:
         rule_output: SkillOutput,
         prompt_config: dict | None,
     ) -> dict:
-        """调用 AI 进行常识验证。
+        """调用 AI 进行常识验证。支持 JSON 和非 JSON 响应。"""
+        import json as _json, re as _re
 
-        Skill 可通过 prompt.yaml 自定义 user_template_validate。
-        框架默认行为：将 rule_output.result 发给 DeepSeek 判断合理性。
-        """
         system_prompt = (prompt_config or {}).get("system_prompt", "你是合理性判断专家。")
         user_template = (prompt_config or {}).get("user_template_validate", "请判断以下结果是否合理：{{result}}")
 
-        user_message = self._render_template(user_template, {"result": rule_output.result})
+        nick = rule_output.result.get("nickname", "")
+        candidates = _json.dumps(rule_output.result.get("candidates", [])[:5], ensure_ascii=False)
+        user_message = self._render_template(user_template, {"result": nick, "candidates": candidates})
 
-        response = await self._deepseek.chat_json(
+        resp = await self._deepseek.chat(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_message},
             ],
-            temperature=0.2,
-            max_tokens=512,
+            temperature=0.1,
+            max_tokens=256,
         )
-        return response
+        content = resp.content.strip()
+
+        # 尝试 JSON 解析
+        for candidate in [content]:
+            if candidate.startswith("```"):
+                lines = candidate.split("\n")
+                end = -1 if lines[-1].strip() == "```" else len(lines)
+                start = 1 if lines[0].startswith("```json") or lines[0].startswith("```") else 0
+                candidate = "\n".join(lines[start:end])
+            try:
+                return _json.loads(candidate)
+            except _json.JSONDecodeError:
+                continue
+
+        # 非 JSON 回退：从文本中提取"合理"/"不合理"关键词
+        if _re.search(r"(合理|reasonable|valid)", content, _re.IGNORECASE):
+            return {"result": "合理", "reason": content[:120]}
+        if _re.search(r"(不合理|unreasonable|invalid|不是)", content, _re.IGNORECASE):
+            return {"result": "不合理", "reason": content[:120]}
+        return {"result": "合理", "reason": "no explicit judgement"}  # 默认乐观
 
     async def _ai_reselect(
         self,
