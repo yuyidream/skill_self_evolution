@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "skill_self_evolution"
+version = "0.1.0"
+description = "Skill 自进化框架：统一规则执行 + AI 常识判断 + 离线进化的可插拔 Skill 执行引擎"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "httpx>=0.25",
+    "pymysql>=1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["skill_self_evolution"]

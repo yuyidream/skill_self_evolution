@@ -1,0 +1,17 @@
+system: |
+  你是配置优化专家。分析以下 Skill 执行日志中的失败案例，提出 rules_config / prompt 改进建议。
+
+analyze_template: |
+  Skill：{{skill_name}}
+  当前 rules_config：{{current_rules_config}}
+  当前 prompt：{{current_prompt}}
+  
+  失败案例（is_failure=true 的记录）：
+  {{failure_logs}}
+
+  请分析失败模式，提出改进建议：
+  1. rules_config.yaml 需要调整什么？（阈值、黑名单词、正则模式）
+  2. prompt.yaml 需要调整什么？（措辞、示例、temperature）
+  注意：只改 rules_config 的数值和 prompt 的措辞，不改逻辑。
+
+  输出 JSON：{"rules_changes": {...}, "prompt_changes": {...}}

@@ -1,0 +1,227 @@
+"""
+配置版本管理器 — MySQL skill_config / skill_config_history 表操作。
+
+职责：
+- 从 MySQL 加载当前激活版本的 rules_config / prompt YAML
+- 写入新版本时自动归档旧版本到 skill_config_history
+- 支持回滚到任意历史版本
+
+housekeeping 项目的 VersionManager 可作为适配器实现同一接口。
+"""
+
+import logging
+from datetime import datetime
+from typing import Any
+
+import pymysql
+import yaml
+
+from skill_self_evolution.config import get_db_config
+
+logger = logging.getLogger(__name__)
+
+
+class ConfigVersionManager:
+    """框架内置版本管理：version 递增 + 历史归档。"""
+
+    def __init__(self, db_config: dict[str, Any] | None = None):
+        if db_config:
+            self._db_config = db_config
+        else:
+            self._db_config = get_db_config()
+        self._conn: pymysql.Connection | None = None
+
+    def set_db_config(self, db_config: dict[str, Any]) -> None:
+        self._db_config = db_config
+
+    def _get_conn(self) -> pymysql.Connection:
+        """获取数据库连接（懒连接 + 自动重连）。"""
+        if self._conn is None or not self._conn.open:
+            self._conn = pymysql.connect(
+                host=self._db_config.get("host", "localhost"),
+                port=self._db_config.get("port", 3306),
+                user=self._db_config.get("user", "root"),
+                password=self._db_config.get("password", ""),
+                database=self._db_config.get("database", "housekeeping"),
+                charset="utf8mb4",
+                autocommit=True,
+            )
+        return self._conn
+
+    def ensure_tables(self) -> None:
+        """自动建表（幂等）。首次使用时或部署阶段调用。"""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS skill_config (
+                    skill_name   VARCHAR(128) NOT NULL COMMENT 'Skill 名称',
+                    config_type  ENUM('rules_config','prompt') NOT NULL COMMENT '配置类型',
+                    content      MEDIUMTEXT NOT NULL COMMENT 'YAML 字符串',
+                    version      INT NOT NULL DEFAULT 1 COMMENT '版本号，每次更新递增',
+                    updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    PRIMARY KEY (skill_name, config_type)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS skill_config_history (
+                    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    skill_name   VARCHAR(128) NOT NULL,
+                    config_type  ENUM('rules_config','prompt') NOT NULL,
+                    content      MEDIUMTEXT NOT NULL,
+                    version      INT NOT NULL,
+                    archived_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_skill_version (skill_name, config_type, version)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """
+            )
+        logger.info("skill_config / skill_config_history 表确认存在")
+
+    def load(self, skill_name: str, config_type: str) -> dict | None:
+        """从 MySQL 加载当前激活版本，返回解析后的 dict。
+        
+        Args:
+            skill_name: Skill 名称（如 "nickname-selector"）
+            config_type: "rules_config" 或 "prompt"
+        
+        Returns:
+            解析后的 YAML dict，未找到配置时返回 None
+        """
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT content FROM skill_config WHERE skill_name = %s AND config_type = %s",
+                (skill_name, config_type),
+            )
+            row = cur.fetchone()
+        if row is None:
+            logger.debug("skill_config 未找到: %s/%s", skill_name, config_type)
+            return None
+        return yaml.safe_load(row[0])
+
+    def load_raw(self, skill_name: str, config_type: str) -> str | None:
+        """加载原始 YAML 字符串（用于进化分析 prompt 注入）。"""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT content FROM skill_config WHERE skill_name = %s AND config_type = %s",
+                (skill_name, config_type),
+            )
+            row = cur.fetchone()
+        return row[0] if row else None
+
+    def save(self, skill_name: str, config_type: str, content: str) -> int:
+        """写入新版本：先归档旧版本到 skill_config_history，再更新主表。
+
+        Args:
+            skill_name: Skill 名称
+            config_type: "rules_config" 或 "prompt"
+            content: YAML 字符串（非解析后的 dict）
+
+        Returns:
+            新版本号
+        """
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            # 查询当前版本号和内容
+            cur.execute(
+                "SELECT version, content FROM skill_config WHERE skill_name = %s AND config_type = %s",
+                (skill_name, config_type),
+            )
+            row = cur.fetchone()
+
+            if row:
+                old_version = row[0]
+                old_content = row[1]
+                new_version = old_version + 1
+                # 归档旧版本
+                cur.execute(
+                    "INSERT INTO skill_config_history (skill_name, config_type, content, version) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (skill_name, config_type, old_content, old_version),
+                )
+                # 更新主表
+                cur.execute(
+                    "UPDATE skill_config SET content = %s, version = %s, updated_at = %s "
+                    "WHERE skill_name = %s AND config_type = %s",
+                    (content, new_version, datetime.now(), skill_name, config_type),
+                )
+            else:
+                new_version = 1
+                cur.execute(
+                    "INSERT INTO skill_config (skill_name, config_type, content, version) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (skill_name, config_type, content, new_version),
+                )
+
+        logger.info("配置写入: %s/%s v%d", skill_name, config_type, new_version)
+        return new_version
+
+    def rollback(self, skill_name: str, config_type: str, target_version: int) -> bool:
+        """回滚到指定版本。
+
+        Args:
+            skill_name: Skill 名称
+            config_type: "rules_config" 或 "prompt"
+            target_version: 目标版本号
+
+        Returns:
+            True 表示回滚成功，False 表示目标版本不存在
+        """
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            # 查找目标版本
+            if target_version == 0:
+                # v0 = 删除当前配置
+                cur.execute(
+                    "DELETE FROM skill_config WHERE skill_name = %s AND config_type = %s",
+                    (skill_name, config_type),
+                )
+                logger.info("配置已删除（回滚到 v0）: %s/%s", skill_name, config_type)
+                return True
+
+            # 从历史表查找
+            cur.execute(
+                "SELECT content FROM skill_config_history "
+                "WHERE skill_name = %s AND config_type = %s AND version = %s "
+                "ORDER BY archived_at DESC LIMIT 1",
+                (skill_name, config_type, target_version),
+            )
+            hist = cur.fetchone()
+            if hist is None:
+                logger.warning("历史版本不存在: %s/%s v%d", skill_name, config_type, target_version)
+                return False
+
+            # 从主表获取当前版本以归档
+            cur.execute(
+                "SELECT version, content FROM skill_config WHERE skill_name = %s AND config_type = %s",
+                (skill_name, config_type),
+            )
+            current = cur.fetchone()
+
+            if current:
+                # 归档当前版本
+                cur.execute(
+                    "INSERT INTO skill_config_history (skill_name, config_type, content, version) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (skill_name, config_type, current[1], current[0]),
+                )
+
+            # 写入目标版本内容
+            new_version = (current[0] + 1) if current else 1
+            cur.execute(
+                "REPLACE INTO skill_config (skill_name, config_type, content, version, updated_at) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (skill_name, config_type, hist[0], new_version, datetime.now()),
+            )
+
+        logger.info("配置回滚成功: %s/%s → v%d (from history v%d)", skill_name, config_type, new_version, target_version)
+        return True
+
+    def close(self) -> None:
+        """关闭数据库连接。"""
+        if self._conn and self._conn.open:
+            self._conn.close()
+            self._conn = None
