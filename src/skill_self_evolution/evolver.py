@@ -18,10 +18,22 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
-import yaml
+from ruamel.yaml import YAML
+
+yaml_safe = YAML(typ='safe')
+yaml_rt = YAML()  # round-trip: 保留注释和格式
+yaml_rt.default_flow_style = False
+
+
+def _yaml_dump_str(data: Any) -> str:
+    """ruamel.yaml YAML().dump() 需要 stream，薄封装返回字符串。"""
+    buf = StringIO()
+    yaml_rt.dump(data, buf)
+    return buf.getvalue()
 
 from skill_self_evolution.deepseek import DeepSeekClient
 from skill_self_evolution.loader import SkillLoader, SkillModule
@@ -160,7 +172,7 @@ class Evolver:
         if not prompt_cfg:
             defaults_path = _FRAMEWORK_DEFAULTS / "evolve_prompt.yaml"
             if defaults_path.exists():
-                prompt_cfg = yaml.safe_load(defaults_path.read_text(encoding="utf-8")) or {}
+                prompt_cfg = yaml_safe.load(defaults_path.read_text(encoding="utf-8")) or {}
 
         system = prompt_cfg.get("system", "你是配置优化专家。")
         template = prompt_cfg.get(
@@ -347,7 +359,7 @@ class Evolver:
         当前实现：简单字符串替换，仅允许阈值调整。
         """
         if not current_yaml:
-            return yaml.dump(changes, allow_unicode=True, default_flow_style=False)
+            return _yaml_dump_str(changes)
 
         # 遍历 changes 中的阈值调整
         modified = current_yaml
@@ -367,12 +379,12 @@ class Evolver:
         当前实现：按字段路径替换 YAML 值。
         """
         if not current_yaml:
-            return yaml.dump(changes, allow_unicode=True, default_flow_style=False)
+            return _yaml_dump_str(changes)
 
         try:
-            cfg = yaml.safe_load(current_yaml) or {}
+            cfg = yaml_rt.load(current_yaml) or {}
             _deep_update(cfg, changes)
-            return yaml.dump(cfg, allow_unicode=True, default_flow_style=False)
+            return _yaml_dump_str(cfg)
         except Exception:
             return current_yaml
 

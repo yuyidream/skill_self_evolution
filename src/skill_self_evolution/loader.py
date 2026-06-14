@@ -8,7 +8,10 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-import yaml
+from ruamel.yaml import YAML
+
+yaml_safe = YAML(typ='safe')
+yaml_rt = YAML()  # round-trip mode — 保留注释和格式，用于 dump
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +137,7 @@ class SkillLoader:
         yaml_path = skill_dir / "evolve_prompt.yaml"
         if not yaml_path.is_file():
             return {}
-        return yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+        return yaml_safe.load(yaml_path.read_text(encoding="utf-8"))
 
     @staticmethod
     def _load_skill_md(skill_dir: Path) -> str | None:

@@ -14,7 +14,9 @@ from datetime import datetime
 from typing import Any
 
 import pymysql
-import yaml
+from ruamel.yaml import YAML
+
+yaml_safe = YAML(typ='safe')
 
 from skill_self_evolution.config import DbConfig, get_db_config
 
@@ -113,7 +115,7 @@ class ConfigVersionManager:
         if row is None:
             logger.debug("skill_config 未找到: %s/%s", skill_name, config_type)
             return None
-        return yaml.safe_load(row[0])
+        return yaml_safe.load(row[0])
 
     def load_raw(self, skill_name: str, config_type: str) -> str | None:
         """加载原始 YAML 字符串（用于进化分析 prompt 注入）。"""
