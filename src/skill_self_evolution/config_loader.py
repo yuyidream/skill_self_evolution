@@ -16,7 +16,7 @@ from typing import Any
 import pymysql
 import yaml
 
-from skill_self_evolution.config import get_db_config
+from skill_self_evolution.config import DbConfig, get_db_config
 
 logger = logging.getLogger(__name__)
 
@@ -24,25 +24,39 @@ logger = logging.getLogger(__name__)
 class ConfigVersionManager:
     """框架内置版本管理：version 递增 + 历史归档。"""
 
-    def __init__(self, db_config: dict[str, Any] | None = None):
-        if db_config:
+    def __init__(self, db_config: dict[str, Any] | DbConfig | None = None):
+        from skill_self_evolution.config import DbConfig
+        if db_config is None:
+            self._db_config = get_db_config()
+        elif isinstance(db_config, DbConfig):
             self._db_config = db_config
         else:
-            self._db_config = get_db_config()
+            self._db_config = db_config
         self._conn: pymysql.Connection | None = None
 
-    def set_db_config(self, db_config: dict[str, Any]) -> None:
+    def set_db_config(self, db_config: dict[str, Any] | DbConfig) -> None:
         self._db_config = db_config
 
     def _get_conn(self) -> pymysql.Connection:
-        """获取数据库连接（懒连接 + 自动重连）。"""
+        """获取数据库连接（懒连接 + 自动重连）。兼容 dict 和 DbConfig。"""
         if self._conn is None or not self._conn.open:
+            db = self._db_config
+            if isinstance(db, DbConfig):
+                host, port, user, password, database = (
+                    db.host, db.port, db.user, db.password, db.database
+                )
+            else:
+                host = db.get("host", "localhost")
+                port = db.get("port", 3306)
+                user = db.get("user", "root")
+                password = db.get("password", "")
+                database = db.get("database", "housekeeping")
             self._conn = pymysql.connect(
-                host=self._db_config.get("host", "localhost"),
-                port=self._db_config.get("port", 3306),
-                user=self._db_config.get("user", "root"),
-                password=self._db_config.get("password", ""),
-                database=self._db_config.get("database", "housekeeping"),
+                host=host,
+                port=port,
+                user=user,
+                password=password,
+                database=database,
                 charset="utf8mb4",
                 autocommit=True,
             )

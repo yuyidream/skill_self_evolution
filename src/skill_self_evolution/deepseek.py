@@ -6,24 +6,14 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
 from skill_self_evolution.config import get_deepseek_config
+from skill_self_evolution.models import DeepSeekChatResponse
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class DeepSeekResponse:
-    """简化的 AI 响应模型，不依赖项目内部 Pydantic。"""
-
-    content: str
-    finish_reason: str | None = None
-    prompt_tokens: int | None = None
-    completion_tokens: int | None = None
 
 
 class CircuitBreaker:
@@ -95,7 +85,7 @@ class DeepSeekClient:
         temperature: float = 0.7,
         max_tokens: int = 2048,
         timeout: float | None = None,
-    ) -> DeepSeekResponse:
+    ) -> DeepSeekChatResponse:
         if self._circuit_breaker.is_open:
             raise RuntimeError("熔断器已开启，拒绝请求")
 
@@ -123,7 +113,7 @@ class DeepSeekClient:
         temperature: float,
         max_tokens: int,
         timeout: float,
-    ) -> DeepSeekResponse:
+    ) -> DeepSeekChatResponse:
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._api_key}",
@@ -144,7 +134,7 @@ class DeepSeekClient:
         choice = data.get("choices", [{}])[0]
         usage = data.get("usage", {})
 
-        return DeepSeekResponse(
+        return DeepSeekChatResponse(
             content=choice.get("message", {}).get("content", ""),
             finish_reason=choice.get("finish_reason"),
             prompt_tokens=usage.get("prompt_tokens"),

@@ -26,6 +26,7 @@ import yaml
 from skill_self_evolution.deepseek import DeepSeekClient
 from skill_self_evolution.loader import SkillLoader, SkillModule
 from skill_self_evolution.logger import _get_log_dir
+from skill_self_evolution.models import EvolveProposalModel
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ def _yesterday_str() -> str:
 
 
 class EvolveProposal:
-    """一次进化分析产生的提案。"""
+    """一次进化分析产生的提案（内部状态用普通类，序列化时通过 EvolveProposalModel 校验）。"""
 
     def __init__(self):
         self.rules_changes: dict[str, Any] = {}
@@ -52,6 +53,19 @@ class EvolveProposal:
         self.benchmark_after: tuple[int, int, list] = (0, 0, [])
         self.applied: bool = False
         self.rolled_back: bool = False
+
+    def to_model(self) -> EvolveProposalModel:
+        """转为 Pydantic 模型（用于序列化/日志）。"""
+        return EvolveProposalModel(
+            rules_changes=self.rules_changes,
+            prompt_changes=self.prompt_changes,
+            rules_text=self.rules_text,
+            prompt_text=self.prompt_text,
+            analysis_raw=self.analysis_raw,
+            failure_count=self.failure_count,
+            applied=self.applied,
+            rolled_back=self.rolled_back,
+        )
 
 
 class Evolver:

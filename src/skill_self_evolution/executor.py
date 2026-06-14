@@ -22,7 +22,13 @@ from skill_self_evolution.deepseek import CircuitBreaker, DeepSeekClient
 from skill_self_evolution.fallback import FallbackConfig, FallbackStrategy
 from skill_self_evolution.loader import SkillLoader, SkillModule
 from skill_self_evolution.logger import SkillLogger
-from skill_self_evolution.models import SkillInput, SkillOutput
+from skill_self_evolution.models import (
+    AiReselectionResult,
+    AiValidationResult,
+    FallbackConfigModel,
+    SkillInput,
+    SkillOutput,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,11 +101,11 @@ class SkillExecutor:
         effective_trace_id = (
             trace_id
             or (getattr(input_data, "trace_id", None))
-            or str(__import__("uuid").uuid4())  # noqa: F811
+            or str(__import__("uuid").uuid4())
         )
         set_trace_id(effective_trace_id)
 
-        # 3. 构建 SkillInput 对象（若传入的是 dict）
+        # 3. 构建 SkillInput（Pydantic 校验入口）
         if isinstance(input_data, dict):
             skill_input = SkillInput(trace_id=effective_trace_id, input_data=input_data)
         else:
@@ -107,7 +113,7 @@ class SkillExecutor:
 
         warnings: list[str] = []
 
-        # 4. 加载降级配置
+        # 4. 加载降级配置（Pydantic 校验）
         fallback_cfg = self._build_fallback_config(rules_config or {})
         fallback = FallbackStrategy(fallback_cfg, self._deepseek.circuit_breaker)
 
@@ -118,7 +124,6 @@ class SkillExecutor:
         }
 
         # 6. 执行规则阶段
-        t0 = time.monotonic()
         try:
             rule_output = skill.execute(skill_input, merged_config)
             if not isinstance(rule_output, SkillOutput):
@@ -129,7 +134,6 @@ class SkillExecutor:
         except Exception as e:
             logger.exception("Skill [%s] 规则执行异常", skill_name)
             elapsed = (time.monotonic() - start_time) * 1000
-            # 规则执行失败 → 返回失败结果
             output = SkillOutput(
                 source="rule",
                 result={"error": str(e)},
@@ -138,9 +142,8 @@ class SkillExecutor:
             self._log(skill, effective_trace_id, True, skill_input, output, None, None, output, warnings, elapsed)
             return output
 
-        rule_elapsed = (time.monotonic() - t0) * 1000
-        ai_validation: dict | None = None
-        ai_reselection: dict | None = None
+        ai_validation: AiValidationResult | None = None
+        ai_reselection: AiReselectionResult | None = None
 
         # 7. AI 处理阶段
         if skill.ai_role == "correction":
@@ -155,7 +158,7 @@ class SkillExecutor:
                 self._log(skill, effective_trace_id, is_failure, skill_input, rule_output, None, None, rule_output, warnings, elapsed)
                 return rule_output
 
-            # 7a. AI 验证
+            # 7a. AI 验证（Pydantic 输出）
             try:
                 ai_validation = await self._ai_validate(skill, rule_output, prompt_config)
                 rule_output.ai_validated = True
@@ -172,7 +175,7 @@ class SkillExecutor:
                     return rule_output
 
             # 7b. 若验证不合理 → AI 重选
-            if ai_validation and ai_validation.get("result") == "不合理":
+            if ai_validation and ai_validation.result == "不合理":
                 fb_reselect = fallback.check_before_ai()
                 if fb_reselect.skip_ai:
                     warnings.extend(fb_reselect.warnings)
@@ -183,11 +186,20 @@ class SkillExecutor:
 
                 try:
                     ai_reselection = await self._ai_reselect(skill, skill_input, rule_output, prompt_config)
-                    if ai_reselection and ai_reselection.get("result") != "不合理":
-                        # AI 重选成功
+                    if ai_reselection and ai_reselection.result != "不合理":
+                        # 包装 AI 重选结果 — 确保 result 是 dict
+                        selected_nickname = ai_reselection.result
+                        if isinstance(selected_nickname, dict):
+                            reselected_dict = selected_nickname
+                        else:
+                            reselected_dict = {
+                                **rule_output.result,
+                                "nickname": str(selected_nickname),
+                                "source": "ai",
+                            }
                         final_output = SkillOutput(
                             source="ai",
-                            result=ai_reselection.get("result", rule_output.result),
+                            result=reselected_dict,
                             ai_validated=True,
                             ai_reselected=True,
                             warnings=warnings,
@@ -225,7 +237,6 @@ class SkillExecutor:
 
             try:
                 ai_result = await self._ai_enhance(skill, skill_input, rule_output, prompt_config)
-                # 合并 AI 增强结果
                 merged_result = {**rule_output.result}
                 if ai_result:
                     merged_result.update(ai_result)
@@ -237,7 +248,7 @@ class SkillExecutor:
                     warnings=warnings,
                 )
                 elapsed = (time.monotonic() - start_time) * 1000
-                self._log(skill, effective_trace_id, False, skill_input, rule_output, ai_validation, None, final_output, warnings, elapsed)
+                self._log(skill, effective_trace_id, False, skill_input, rule_output, None, None, final_output, warnings, elapsed)
                 return final_output
             except Exception as e:
                 logger.warning("Skill [%s] AI 增强异常: %s", skill_name, e)
@@ -257,9 +268,9 @@ class SkillExecutor:
     # ── 私有方法 ──
 
     def _build_fallback_config(self, rules_config: dict) -> FallbackConfig:
-        """从 rules_config 的 ai_fallback 段构建降级配置。"""
+        """从 rules_config 的 ai_fallback 段构建降级配置（Pydantic 校验）。"""
         af = rules_config.get("ai_fallback", {})
-        return FallbackConfig(
+        validated = FallbackConfigModel(
             validate_timeout_seconds=float(af.get("validate_timeout_seconds", 3)),
             reselect_timeout_seconds=float(af.get("reselect_timeout_seconds", 5)),
             max_retries=int(af.get("max_retries", 1)),
@@ -267,24 +278,31 @@ class SkillExecutor:
             circuit_breaker_cooldown_seconds=float(af.get("circuit_breaker_cooldown_seconds", 60)),
             conservative_mode=bool(af.get("conservative_mode", False)),
         )
+        return FallbackConfig(
+            validate_timeout_seconds=validated.validate_timeout_seconds,
+            reselect_timeout_seconds=validated.reselect_timeout_seconds,
+            max_retries=validated.max_retries,
+            circuit_breaker_threshold=validated.circuit_breaker_threshold,
+            circuit_breaker_cooldown_seconds=validated.circuit_breaker_cooldown_seconds,
+            conservative_mode=validated.conservative_mode,
+        )
 
     @staticmethod
     def _compute_is_failure(
         ai_role: str,
         rule_output: SkillOutput,
-        ai_validation: dict | None,
-        ai_reselection: dict | None,
+        ai_validation: AiValidationResult | None,
+        ai_reselection: AiReselectionResult | None,
     ) -> bool:
         """根据 ai_role 计算 is_failure 标记。"""
         if ai_role == "enhancement":
             return False
 
         if ai_role == "correction":
-            if ai_validation and ai_validation.get("result") == "不合理":
+            if ai_validation and ai_validation.result == "不合理":
                 return True
-            if ai_reselection and ai_reselection.get("result") == "不合理":
+            if ai_reselection and ai_reselection.result == "不合理":
                 return True
-            # 规则返回空/兜底值也标记
             result = rule_output.result
             if not result or result.get("error"):
                 return True
@@ -296,8 +314,8 @@ class SkillExecutor:
         skill: SkillModule,
         rule_output: SkillOutput,
         prompt_config: dict | None,
-    ) -> dict:
-        """调用 AI 进行常识验证。支持 JSON 和非 JSON 响应。"""
+    ) -> AiValidationResult:
+        """调用 AI 进行常识验证。返回 Pydantic 模型。"""
         import json as _json, re as _re
 
         system_prompt = (prompt_config or {}).get("system_prompt", "你是合理性判断专家。")
@@ -325,16 +343,20 @@ class SkillExecutor:
                 start = 1 if lines[0].startswith("```json") or lines[0].startswith("```") else 0
                 candidate = "\n".join(lines[start:end])
             try:
-                return _json.loads(candidate)
-            except _json.JSONDecodeError:
+                parsed = _json.loads(candidate)
+                return AiValidationResult(
+                    result=parsed.get("result", "合理"),
+                    reason=parsed.get("reason", ""),
+                )
+            except (_json.JSONDecodeError, ValueError):
                 continue
 
-        # 非 JSON 回退：从文本中提取"合理"/"不合理"关键词
-        if _re.search(r"(合理|reasonable|valid)", content, _re.IGNORECASE):
-            return {"result": "合理", "reason": content[:120]}
+        # 非 JSON 回退：先检查"不合理"，避免"不合理"中的"合理"被误匹配
         if _re.search(r"(不合理|unreasonable|invalid|不是)", content, _re.IGNORECASE):
-            return {"result": "不合理", "reason": content[:120]}
-        return {"result": "合理", "reason": "no explicit judgement"}  # 默认乐观
+            return AiValidationResult(result="不合理", reason=content[:120])
+        if _re.search(r"(合理|reasonable|valid)", content, _re.IGNORECASE):
+            return AiValidationResult(result="合理", reason=content[:120])
+        return AiValidationResult(result="合理", reason="no explicit judgement")
 
     async def _ai_reselect(
         self,
@@ -342,20 +364,19 @@ class SkillExecutor:
         skill_input: SkillInput,
         rule_output: SkillOutput,
         prompt_config: dict | None,
-    ) -> dict:
-        """调用 AI 重新选择/提取。
+    ) -> AiReselectionResult:
+        """调用 AI 重新选择/提取。返回 Pydantic 模型。"""
+        import json as _json2
 
-        Skill 可通过 prompt.yaml 自定义 user_template_reselect。
-        """
         system_prompt = (prompt_config or {}).get("system_prompt", "你是信息提取专家。")
         user_template = (prompt_config or {}).get("user_template_reselect", "请从以下数据中重新选择：{{candidates}}")
 
+        candidates_list = rule_output.result.get("candidates", []) if isinstance(rule_output.result, dict) else []
+        candidates_json = _json2.dumps(candidates_list, ensure_ascii=False)
+
         user_message = self._render_template(
             user_template,
-            {
-                "candidates": rule_output.result,
-                "input_data": skill_input.input_data,
-            },
+            {"candidates": candidates_json},
         )
 
         response = await self._deepseek.chat_json(
@@ -366,7 +387,11 @@ class SkillExecutor:
             temperature=0.2,
             max_tokens=1024,
         )
-        return response
+
+        return AiReselectionResult(
+            result=str(response.get("result", "")),
+            reason=str(response.get("reason", "")),
+        )
 
     async def _ai_enhance(
         self,
@@ -411,13 +436,13 @@ class SkillExecutor:
         is_failure: bool,
         skill_input: SkillInput,
         rule_output: SkillOutput,
-        ai_validation: dict | None,
-        ai_reselection: dict | None,
+        ai_validation: AiValidationResult | None,
+        ai_reselection: AiReselectionResult | None,
         final_output: SkillOutput,
         warnings: list[str],
         elapsed_ms: float,
     ) -> None:
-        """写入 JSONL 日志。"""
+        """写入 JSONL 日志（Pydantic LogEntry 校验）。"""
         try:
             log_writer = SkillLogger(skill.skill_name)
 
@@ -430,16 +455,17 @@ class SkillExecutor:
             else:
                 input_summary = {"type": type(skill_input.input_data).__name__}
 
+            # 通过 log_execution 统一校验（LogEntry Pydantic 模型）后写入
             log_writer.log_execution(
                 trace_id=trace_id,
                 is_failure=is_failure,
                 input_summary=input_summary,
                 rule_output=rule_output.result,
-                ai_validation=ai_validation,
-                ai_reselection=ai_reselection,
+                ai_validation=ai_validation.model_dump() if ai_validation else None,
+                ai_reselection=ai_reselection.model_dump() if ai_reselection else None,
                 final_output=final_output.result,
                 warnings=warnings,
-                elapsed_ms=elapsed_ms,
+                elapsed_ms=round(elapsed_ms, 1),
             )
         except Exception as e:
             logger.warning("Skill 日志记录失败: %s", e)

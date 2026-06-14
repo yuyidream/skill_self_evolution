@@ -14,19 +14,26 @@ import logging
 from dataclasses import dataclass, field
 from enum import Enum
 
+from pydantic import BaseModel, Field
+
 from skill_self_evolution.deepseek import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
 
 class FallbackMode(str, Enum):
-    OPTIMISTIC = "optimistic"    # 乐观：AI 不可用时默认通过
-    CONSERVATIVE = "conservative"  # 保守：AI 不可用时标记需人工复核
+    OPTIMISTIC = "optimistic"
+    CONSERVATIVE = "conservative"
 
 
 @dataclass
 class FallbackConfig:
-    """降级配置，来源 rules_config.yaml 的 ai_fallback 段。"""
+    """降级配置，来源 rules_config.yaml 的 ai_fallback 段。
+
+    注：此结构保持 @dataclass（非 Pydantic），原因：
+    - 构造来源已通过 FallbackConfigModel（Pydantic）校验
+    - 内嵌在 FallbackStrategy 中，无独立序列化需求
+    """
 
     validate_timeout_seconds: float = 3.0
     reselect_timeout_seconds: float = 5.0
@@ -34,21 +41,16 @@ class FallbackConfig:
     circuit_breaker_threshold: int = 3
     circuit_breaker_cooldown_seconds: float = 60.0
     conservative_mode: bool = False
-    enabled: bool = True  # 是否启用 AI（全局开关）
+    enabled: bool = True
 
 
-@dataclass
-class FallbackResult:
-    """降级处理结果。"""
+class FallbackResult(BaseModel):
+    """降级处理结果（Pydantic 校验）。"""
 
-    # 是否应跳过 AI 步骤（熔断/禁用/超时等）
-    skip_ai: bool = False
-    # 降级原因
-    reason: str = ""
-    # 降级时的警告信息
-    warnings: list[str] = field(default_factory=list)
-    # AI 不可用时是否标记需人工复核（保守模式）
-    needs_review: bool = False
+    skip_ai: bool = Field(default=False, description="是否应跳过 AI 步骤")
+    reason: str = Field(default="", description="降级原因")
+    warnings: list[str] = Field(default_factory=list, description="降级时的警告信息")
+    needs_review: bool = Field(default=False, description="AI 不可用时是否标记需人工复核")
 
 
 class FallbackStrategy:
