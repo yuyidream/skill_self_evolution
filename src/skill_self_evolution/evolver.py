@@ -363,22 +363,23 @@ class Evolver:
     def _apply_rules_changes(self, current_yaml: str, changes: dict, max_change_percent: float) -> str:
         """将 DeepSeek 产出的 rules_changes 合并到现有 YAML。
 
-        当前实现：简单字符串替换，仅允许阈值调整。
+        使用 YAML deep-merge（同 _apply_prompt_changes），支持列表项增删、嵌套 dict 修改。
+        对数值变更做 max_change_percent 校验并告警。
         """
         if not current_yaml:
             return _yaml_dump_str(changes)
 
-        # 遍历 changes 中的阈值调整
-        modified = current_yaml
-        for key, value in changes.items():
-            if isinstance(value, (int, float)):
-                # 查找 YAML 中的对应键并替换数值
-                import re
-                pattern = rf"^\s*{re.escape(key)}\s*:\s*[\d.]+"
-                new_line = f"{key}: {value}"
-                modified = re.sub(pattern, new_line, modified, flags=re.MULTILINE)
+        try:
+            cfg = yaml_rt.load(current_yaml) or {}
 
-        return modified
+            # 数值变更校验：超过 max_change_percent 仅告警，不阻断
+            _warn_numeric_drift(cfg, changes, max_change_percent)
+
+            _deep_update(cfg, changes)
+            return _yaml_dump_str(cfg)
+        except Exception:
+            logger.warning("EvoSkill [%s] rules_config YAML 合并失败，回退原始 YAML", self.skill_name)
+            return current_yaml
 
     def _apply_prompt_changes(self, current_yaml: str, changes: dict) -> str:
         """将 DeepSeek 产出的 prompt_changes 合并到现有 YAML。
@@ -394,6 +395,24 @@ class Evolver:
             return _yaml_dump_str(cfg)
         except Exception:
             return current_yaml
+
+
+def _warn_numeric_drift(original: dict, changes: dict, max_pct: float) -> None:
+    """对 changes 中数值字段做漂移校验，超过 max_pct 仅告警。"""
+    for key, value in changes.items():
+        if isinstance(value, dict):
+            _warn_numeric_drift(original.get(key, {}), value, max_pct)
+        elif isinstance(value, list):
+            pass  # 列表项增删不做百分比校验
+        elif isinstance(value, (int, float)):
+            orig_val = original.get(key)
+            if isinstance(orig_val, (int, float)) and orig_val != 0:
+                drift = abs(value - orig_val) / abs(orig_val) * 100
+                if drift > max_pct:
+                    logger.warning(
+                        "EvoSkill rules_config 数值变更超限: %s %s → %s (%.1f%%, 阈值 %.0f%%)",
+                        key, orig_val, value, drift, max_pct,
+                    )
 
 
 def _deep_update(base: dict, updates: dict) -> None:

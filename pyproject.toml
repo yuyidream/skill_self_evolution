@@ -27,3 +27,8 @@ lint = [
 [tool.setuptools]
 package-dir = { "" = "src" }
 packages = ["skill_self_evolution"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: integration tests that require external resources (AI API, DB, etc.)",
+]
