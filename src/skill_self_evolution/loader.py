@@ -3,7 +3,9 @@ Skill 动态加载器 — 加载 run.py / summarize_input / evolve.toml / evolve
 """
 
 import importlib.util
-from loguru import logger
+from skill_self_evolution.logging import get_logger
+
+logger = get_logger(__name__)
 import os
 from pathlib import Path
 from typing import Any, Callable

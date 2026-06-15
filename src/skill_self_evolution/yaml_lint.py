@@ -9,8 +9,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-from loguru import logger
+from skill_self_evolution.logging import get_logger
 
+logger = get_logger(__name__)
 RYL_CONFIG_PATH = Path(__file__).resolve().parents[2] / ".ryl.toml"
 
 

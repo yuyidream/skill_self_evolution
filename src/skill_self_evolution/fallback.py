@@ -10,7 +10,9 @@ AI 降级策略 — 乐观/保守模式 + 熔断检查。
 - warnings → 仅用于日志和监控，不阻断流程
 """
 
-from loguru import logger
+from skill_self_evolution.logging import get_logger
+
+logger = get_logger(__name__)
 from dataclasses import dataclass, field
 from enum import Enum
 

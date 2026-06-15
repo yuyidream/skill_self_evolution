@@ -14,7 +14,9 @@ EvoSkill 离线进化器 — 读 JSONL 日志 → DeepSeek 分析失败模式 �
 """
 
 import json
-from loguru import logger
+from skill_self_evolution.logging import get_logger
+
+logger = get_logger(__name__)
 import os
 import time
 from datetime import datetime, timedelta, timezone

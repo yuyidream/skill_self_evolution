@@ -9,7 +9,9 @@ AiAssistedExecutor — 通用 AI 辅助执行基类。
 框架自动处理：降级、熔断、is_failure 计算、JSONL 日志。
 """
 
-from loguru import logger
+from skill_self_evolution.logging import get_logger
+
+logger = get_logger(__name__)
 import time
 from abc import ABC, abstractmethod
 from typing import Any

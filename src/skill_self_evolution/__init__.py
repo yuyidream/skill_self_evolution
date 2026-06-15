@@ -12,6 +12,7 @@ from skill_self_evolution.fallback import FallbackStrategy
 from skill_self_evolution.config_loader import ConfigVersionManager
 from skill_self_evolution.evolver import Evolver
 from skill_self_evolution.ai_assisted_executor import AiAssistedExecutor
+from skill_self_evolution.deepseek import CircuitBreaker, DeepSeekClient, StreamChunk, normalize_deepseek_api_base
 
 __all__ = [
     "SkillExecutor",
@@ -24,4 +25,8 @@ __all__ = [
     "ConfigVersionManager",
     "Evolver",
     "AiAssistedExecutor",
+    "CircuitBreaker",
+    "DeepSeekClient",
+    "StreamChunk",
+    "normalize_deepseek_api_base",
 ]

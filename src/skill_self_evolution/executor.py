@@ -12,7 +12,9 @@ SkillExecutor — Skill 执行引擎主类。
 """
 
 import asyncio
-from loguru import logger
+from skill_self_evolution.logging import get_logger
+
+logger = get_logger(__name__)
 import time
 from pathlib import Path
 from typing import Any

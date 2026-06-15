@@ -1,5 +1,5 @@
 """
-JSONL 日志器 — 使用 loguru 结构化日志 + Pydantic 校验。
+JSONL 日志器 — 使用 structlog 结构化日志 + Pydantic 校验。
 
 日志路径: /data/skill-logs/{skill_name}/{date}.jsonl
 （可通过 SKILL_LOG_DIR 环境变量覆盖）
@@ -10,7 +10,9 @@ import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from loguru import logger
+from skill_self_evolution.logging import get_logger
+
+logger = get_logger(__name__)
 
 from skill_self_evolution.models import LogEntry
 

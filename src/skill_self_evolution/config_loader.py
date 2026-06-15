@@ -9,7 +9,9 @@
 housekeeping 项目的 VersionManager 可作为适配器实现同一接口。
 """
 
-from loguru import logger
+from skill_self_evolution.logging import get_logger
+
+logger = get_logger(__name__)
 from datetime import datetime, timezone, timedelta
 
 _BEIJING_TZ = timezone(timedelta(hours=8))
