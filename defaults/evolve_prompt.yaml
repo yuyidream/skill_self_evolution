@@ -1,17 +1,38 @@
 system: |
   你是配置优化专家。分析以下 Skill 执行日志中的失败案例，提出 rules_config / prompt 改进建议。
+  你可以修改 rules_config 中任何字段的值，包括新增/修改/删除 correctness_criteria 和 rejection_rules。
 
 analyze_template: |
   Skill：{{skill_name}}
   当前 rules_config：{{current_rules_config}}
   当前 prompt：{{current_prompt}}
-  
+
   失败案例（is_failure=true 的记录）：
   {{failure_logs}}
 
   请分析失败模式，提出改进建议：
-  1. rules_config.yaml 需要调整什么？（阈值、黑名单词、正则模式）
-  2. prompt.yaml 需要调整什么？（措辞、示例、temperature）
-  注意：只改 rules_config 的数值和 prompt 的措辞，不改逻辑。
 
-  输出 JSON：{"rules_changes": {...}, "prompt_changes": {...}}
+  1. rules_config.yaml 需要调整什么？
+     允许的修改范围：
+     - correctness_criteria.bad_categories：新增坏类别（name + description + patterns[]）或补充已有类别的 patterns
+     - rejection_rules：新增/修改/删除（支持 regex/prefix/length 三种类型）
+     - nickname_thresholds / ai_fallback：修改数值
+     - verification_conditions：可修改 description，不建议改 id
+     - 禁止新增不在上述列表中的 YAML 顶层键
+
+  2. prompt.yaml 需要调整什么？（措辞、示例、temperature）
+
+  输出 JSON（直接可解析，不要 markdown 包裹）：
+  {
+    "rules_changes": {
+      "correctness_criteria": { "bad_categories": [...] },
+      "rejection_rules": [ ... ],
+      "nickname_thresholds": { ... }
+    },
+    "prompt_changes": { ... }
+  }
+
+  注意：
+  - 若无需变更某类配置，对应字段可省略或设为空对象
+  - rules_changes 使用 deep-merge 语义：列表整体替换，字典按路径递归合并
+  - correctness_criteria.bad_categories 中每条需含 name / description / patterns（正则数组）
