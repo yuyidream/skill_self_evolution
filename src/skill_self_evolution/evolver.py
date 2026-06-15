@@ -317,7 +317,8 @@ class Evolver:
                 if lint_errors:
                     logger.warning("EvoSkill [%s] rules_config lint issues: %s", self.skill_name, lint_errors)
                 self._version_mgr.save(self.skill_name, "rules_config", proposal.rules_text)
-                logger.info("EvoSkill [%s] rules_config 已写入 MySQL", self.skill_name)
+                self._sync_rules_to_disk(proposal.rules_text)
+                logger.info("EvoSkill [%s] rules_config 已写入 MySQL + 同步到磁盘", self.skill_name)
             if proposal.prompt_text and auto_cfg.get("prompt", False):
                 proposal.prompt_text, lint_errors = lint_and_fix_yaml(proposal.prompt_text)
                 if lint_errors:
@@ -349,6 +350,10 @@ class Evolver:
                     )
                     if proposal.rules_text and auto_cfg.get("rules_config", False):
                         self._version_mgr.rollback(self.skill_name, "rules_config", 0)
+                        # 回滚后从 MySQL 读回旧配置并同步到磁盘
+                        restored = self._version_mgr.load_raw(self.skill_name, "rules_config")
+                        if restored:
+                            self._sync_rules_to_disk(restored)
                     if proposal.prompt_text and auto_cfg.get("prompt", False):
                         self._version_mgr.rollback(self.skill_name, "prompt", 0)
                     proposal.rolled_back = True
@@ -359,6 +364,16 @@ class Evolver:
                 proposal.applied = applied
 
         return proposal
+
+    def _sync_rules_to_disk(self, yaml_content: str) -> None:
+        """MySQL → 磁盘同步：将 rules_config 内容写回到 Skill 目录的 rules_config.yaml。"""
+        disk_path = self._loader._base_dir / self.skill_name / "rules_config.yaml"
+        try:
+            disk_path.parent.mkdir(parents=True, exist_ok=True)
+            disk_path.write_text(yaml_content, encoding="utf-8")
+            logger.info("EvoSkill [%s] rules_config 已同步到磁盘: %s", self.skill_name, disk_path)
+        except Exception as e:
+            logger.warning("EvoSkill [%s] 磁盘同步失败: %s", self.skill_name, e)
 
     def _apply_rules_changes(self, current_yaml: str, changes: dict, max_change_percent: float) -> str:
         """将 DeepSeek 产出的 rules_changes 合并到现有 YAML。
