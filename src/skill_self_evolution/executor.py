@@ -30,11 +30,14 @@ from skill_self_evolution.logger import SkillLogger
 from skill_self_evolution.models import (
     AiReselectionResult,
     AiValidationResult,
+    BlockCandidate,
     CandidateInput,
     FallbackConfigModel,
+    OcrBlock,
     PromptConfigModel,
     RuleResultDict,
     RulesConfigModel,
+    SessionInput,
     SkillOutput,
 )
 from skill_self_evolution.rule_runner import run_rejection_rules
@@ -74,8 +77,9 @@ class SkillExecutor:
 
     async def run(
         self,
-        candidates_path: str,
+        candidates_path: str = "",
         *,
+        session_dir: str = "",
         rules_config: dict | None = None,
         prompt_config: dict | None = None,
         trace_id: str | None = None,
@@ -84,6 +88,9 @@ class SkillExecutor:
 
         Args:
             candidates_path: 候选人 JSON 文件路径，格式 {"candidates": [...]}
+            session_dir: session 目录路径（含 debug_session_derived.json + speaker JSON）
+                        传入后从 session 目录自动加载候选块，
+                        优先级高于 candidates_path
             rules_config: rules_config.yaml 解析后的 dict
             prompt_config: prompt.yaml 解析后的 dict
             trace_id: 外部 trace_id
@@ -110,16 +117,23 @@ class SkillExecutor:
                 result={"error": f"配置校验失败: {e}"},
                 warnings=[f"配置校验失败: {e}"],
             )
-            self._log(effective_trace_id, True, candidates_path, output, None, None, output, [f"配置校验失败: {e}"], elapsed)
+            self._log(effective_trace_id, True, candidates_path or session_dir, output, None, None, output, [f"配置校验失败: {e}"], elapsed)
             return output
 
         # 3. 降级配置
         fallback_cfg = self._build_fallback_config(rules_config or {})
         fallback = FallbackStrategy(fallback_cfg, self._deepseek.circuit_breaker)
 
-        # 4. 规则阶段：读候选人 JSON → Pydantic 校验 → rule_runner 过滤
+        # 4. 规则阶段：加载候选池 → 过滤
         try:
-            candidates = self._load_candidates(candidates_path)
+            if session_dir:
+                # 从 session 目录加载候选块
+                candidates = self._load_candidates_from_session(session_dir)
+                data_source = session_dir
+            else:
+                candidates = self._load_candidates(candidates_path)
+                data_source = candidates_path
+
             rejection_rules = (rules_config or {}).get("rejection_rules", [])
             filtered = self._apply_rules(candidates, rejection_rules)
             rule_result = RuleResultDict(
@@ -135,7 +149,7 @@ class SkillExecutor:
                 result={"error": str(e)},
                 warnings=[f"规则阶段异常: {e}"],
             )
-            self._log(effective_trace_id, True, candidates_path, output, None, None, output, warnings, elapsed)
+            self._log(effective_trace_id, True, candidates_path or session_dir, output, None, None, output, warnings, elapsed)
             return output
 
         ai_validation: AiValidationResult | None = None
@@ -150,7 +164,7 @@ class SkillExecutor:
                 rule_output.warnings = warnings
                 elapsed = (time.monotonic() - start_time) * 1000
                 is_failure = self._compute_is_failure(rule_output, None, None)
-                self._log(effective_trace_id, is_failure, candidates_path, rule_output, None, None, rule_output, warnings, elapsed)
+                self._log(effective_trace_id, is_failure, data_source, rule_output, None, None, rule_output, warnings, elapsed)
                 return rule_output
 
             try:
@@ -165,7 +179,7 @@ class SkillExecutor:
                     rule_output.ai_validated = False
                     rule_output.warnings = warnings
                     is_failure = self._compute_is_failure(rule_output, None, None)
-                    self._log(effective_trace_id, is_failure, candidates_path, rule_output, None, None, rule_output, warnings, elapsed)
+                    self._log(effective_trace_id, is_failure, data_source, rule_output, None, None, rule_output, warnings, elapsed)
                     return rule_output
 
             if ai_validation and ai_validation.result == "不合理":
@@ -174,7 +188,7 @@ class SkillExecutor:
                     warnings.extend(fb_reselect.warnings)
                     elapsed = (time.monotonic() - start_time) * 1000
                     is_failure = self._compute_is_failure(rule_output, ai_validation, None)
-                    self._log(effective_trace_id, is_failure, candidates_path, rule_output, ai_validation, None, rule_output, warnings, elapsed)
+                    self._log(effective_trace_id, is_failure, data_source, rule_output, ai_validation, None, rule_output, warnings, elapsed)
                     return rule_output
 
                 try:
@@ -194,7 +208,7 @@ class SkillExecutor:
                         )
                         elapsed = (time.monotonic() - start_time) * 1000
                         is_failure = self._compute_is_failure(rule_output, ai_validation, ai_reselection)
-                        self._log(effective_trace_id, is_failure, candidates_path, rule_output, ai_validation, ai_reselection, final_output, warnings, elapsed)
+                        self._log(effective_trace_id, is_failure, data_source, rule_output, ai_validation, ai_reselection, final_output, warnings, elapsed)
                         return final_output
                     else:
                         rule_output.ai_reselected = True
@@ -208,7 +222,7 @@ class SkillExecutor:
             rule_output.warnings = warnings
             elapsed = (time.monotonic() - start_time) * 1000
             is_failure = self._compute_is_failure(rule_output, ai_validation, ai_reselection)
-            self._log(effective_trace_id, is_failure, candidates_path, rule_output, ai_validation, ai_reselection, rule_output, warnings, elapsed)
+            self._log(effective_trace_id, is_failure, data_source, rule_output, ai_validation, ai_reselection, rule_output, warnings, elapsed)
             return rule_output
 
         elif self.ai_role == "enhancement":
@@ -217,7 +231,7 @@ class SkillExecutor:
                 warnings.extend(fb_check.warnings)
                 rule_output.warnings = warnings
                 elapsed = (time.monotonic() - start_time) * 1000
-                self._log(effective_trace_id, False, candidates_path, rule_output, None, None, rule_output, warnings, elapsed)
+                self._log(effective_trace_id, False, data_source, rule_output, None, None, rule_output, warnings, elapsed)
                 return rule_output
 
             try:
@@ -233,20 +247,20 @@ class SkillExecutor:
                     warnings=warnings,
                 )
                 elapsed = (time.monotonic() - start_time) * 1000
-                self._log(effective_trace_id, False, candidates_path, rule_output, None, None, final_output, warnings, elapsed)
+                self._log(effective_trace_id, False, data_source, rule_output, None, None, final_output, warnings, elapsed)
                 return final_output
             except Exception as e:
                 logger.warning("Executor [%s] AI 增强异常: %s", self.skill_name, e)
                 rule_output.warnings = warnings
                 elapsed = (time.monotonic() - start_time) * 1000
-                self._log(effective_trace_id, False, candidates_path, rule_output, None, None, rule_output, warnings, elapsed)
+                self._log(effective_trace_id, False, data_source, rule_output, None, None, rule_output, warnings, elapsed)
                 return rule_output
 
         else:
             logger.warning("Executor [%s] 未知 ai_role=%s，纯规则输出", self.skill_name, self.ai_role)
             rule_output.warnings = warnings
             elapsed = (time.monotonic() - start_time) * 1000
-            self._log(effective_trace_id, False, candidates_path, rule_output, None, None, rule_output, warnings, elapsed)
+            self._log(effective_trace_id, False, data_source, rule_output, None, None, rule_output, warnings, elapsed)
             return rule_output
 
     # ── 候选池处理 ──
@@ -254,9 +268,78 @@ class SkillExecutor:
     @staticmethod
     def _load_candidates(path: str) -> list[str]:
         """读取候选人 JSON 文件并做 Pydantic 校验。"""
+        if not path:
+            return []
         data = _json.loads(Path(path).read_text(encoding="utf-8"))
         validated = CandidateInput.model_validate(data)
         return validated.candidates
+
+    @staticmethod
+    def _load_candidates_from_session(session_dir: str) -> list[str]:
+        """从 session 目录读取候选昵称文本。
+
+        读取顺序：
+        1. debug_session_derived.json → 提取所有 class="nickname_candidate" 的 text
+        2. speaker JSON → 读取 speaker_binding_raw 作为管线选中昵称（置顶）
+
+        Returns:
+            list[str]: 候选昵称文本列表（管线选中昵称排在首位）
+        """
+        session_path = Path(session_dir)
+        if not session_path.is_dir():
+            return []
+
+        candidates: list[str] = []
+        pipeline_selected: str = ""
+
+        # 1. 读取 debug_session_derived.json
+        debug_path = session_path / "debug_session_derived.json"
+        if debug_path.exists():
+            try:
+                debug_data = _json.loads(debug_path.read_text(encoding="utf-8"))
+                screenshots = debug_data.get("screenshots", []) if isinstance(debug_data, dict) else []
+                if not screenshots and isinstance(debug_data, list):
+                    screenshots = debug_data
+
+                for scr in screenshots:
+                    blocks = scr.get("blocks", []) if isinstance(scr, dict) else []
+                    for blk in blocks:
+                        if not isinstance(blk, dict):
+                            continue
+                        if blk.get("class") == "nickname_candidate":
+                            txt = blk.get("text", "").strip()
+                            if txt and txt not in candidates:
+                                candidates.append(txt)
+            except Exception:
+                pass
+
+        # 2. 读取 speaker JSON 获取管线选中昵称
+        speaker_files = sorted(session_path.glob("*.json"))
+        for sf in speaker_files:
+            if sf.name in ("metadata.json", "debug_session_derived.json", "customer_metadata.json"):
+                continue
+            try:
+                data = _json.loads(sf.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    md5_sp = data.get("md5_spokesperson", {})
+                    if isinstance(md5_sp, dict):
+                        binding = md5_sp.get("speaker_binding_raw", "")
+                        if isinstance(binding, str) and binding.strip():
+                            pipeline_selected = binding.strip()
+                        elif isinstance(binding, dict):
+                            pipeline_selected = str(binding.get("result", ""))
+                        elif isinstance(binding, list) and binding:
+                            pipeline_selected = str(binding[0])
+            except Exception:
+                continue
+
+        # 3. 管线选中昵称置顶
+        if pipeline_selected:
+            if pipeline_selected in candidates:
+                candidates.remove(pipeline_selected)
+            candidates.insert(0, pipeline_selected)
+
+        return candidates
 
     @staticmethod
     def _apply_rules(candidates: list[str], rejection_rules: list[dict]) -> list[str]:

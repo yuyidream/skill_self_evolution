@@ -15,6 +15,7 @@
 | 版本号 | 修订日期 | 修订内容 | 需求提出人 | 产品经理 | 备注 |
 |--------|----------|----------|------------|----------|------|
 | V 0.1  |          | 新建     |            |          |      |
+| V 0.2  | 2026-06-16 | 阶段1+2实施：框架 geometry 规则支持、executor session_dir、EvolveGuardModel 补齐、管线 rules_config 补全、run.py session_dir、扫描旁路 JSONL hook、nickname_ocr_simple 声明式桥接（附加过滤）、进化 APScheduler 凌晨2点 | AI | AI | 测试通过 |
 
 ---
 
@@ -96,7 +97,7 @@
 
 | 层 | 内容 | 执行策略 |
 |----|------|---------|
-| **逐块过滤层** `_classify()` | 文本规则 + 几何规则 + 头像守卫 | 替换为声明式规则引擎（`rules_config.yaml` + `rule_runner.py`）；逐块分类产出候选池，`rules_config.yaml` 无法解析时自动降级到旧硬编码 |
+| **逐块过滤层** `_classify()` | 文本规则 + 几何规则 + 头像守卫 | 硬编码逻辑保持原有分类决策；声明式规则引擎（`rules_config.yaml` + `rule_runner.py`）作为**附加过滤层**，对已分类的 nickname_candidate 增加额外 drop 规则。`rules_config.yaml` 无法解析时自动降级到纯硬编码。`_get_declarative_rules()` / `_declarative_should_drop()` 提供缓存式热加载 |
 | **结构编排层** | 气泡碎片合并、发言认领、简历卡绑定三步逻辑、orphan 归因，从候选池中选出最终昵称 | 算法流程保持硬编码，**参数**纳入 YAML 配置（见下） |
 
 `rules_config.yaml` 覆盖范围（Evolver 在 `mode=full` 下可自主改进）：
@@ -107,16 +108,16 @@
 | `nickname_thresholds` | 数值阈值（min_confidence、nickname_max_chars、screen_midline_ratio、nickname_max_x1_ratio） | YAML 扩展 | 原 `NicknameOcrConfig` 类 | ✅ 已实现 | **filter 层** |
 | `correctness_criteria` | AI 判定用的 bad_categories、verification_conditions | YAML 已有 | 不变 | ✅ 已实现 | — |
 | `ai_fallback` | AI 熔断/降级参数（timeout、重试次数、断路器阈值） | YAML 已有 | SkillExecutor 内置 | ✅ 已实现 | — |
-| `geometry_rules` | 几何约束（horizontal_position / avatar_column / bbox_width / char_height_ratio） | YAML 新增 | 原 `_classify()` 内的 `_is_on_left_half`、`_is_avatar_column_nickname_row` 等 | ⬜ 计划新增 | **filter 层** |
-| `bubble_merge` | 气泡碎片归并参数（vertical_gap_max_px、fragment_same_line_y_tol_px、fragment_horizontal_gap_max_px） | YAML 新增 | 原 `NicknameOcrConfig` 类 | ⬜ 计划新增 | **structural 层** |
-| `placeholder_lines` | 发言正文占位行剔除列表（如 `[语音]`、`[图片]` 等） | YAML 新增 | 原 Python `_PLACEHOLDER_EXACT_LINES` frozenset | ⬜ 计划新增 | **structural 层** |
-| `card_binding` | 卡片绑定参数（inside_y_tolerance_px、orphan_distance_threshold_px、thumb_block_mask_midline_ratio） | YAML 新增 | 原函数体内硬编码参数 | ⬜ 计划新增 | **structural 层** |
+| `geometry_rules` | 几何约束（horizontal_position / avatar_column / bbox_width / char_height_ratio） | YAML 新增 | 原 `_classify()` 内的 `_is_on_left_half`、`_is_avatar_column_nickname_row` 等 | ✅ 已实现 | **filter 层** |
+| `bubble_merge` | 气泡碎片归并参数（vertical_gap_max_px、fragment_same_line_y_tol_px、fragment_horizontal_gap_max_px） | YAML 新增 | 原 `NicknameOcrConfig` 类 | ✅ 已实现 | **structural 层** |
+| `placeholder_lines` | 发言正文占位行剔除列表（如 `[语音]`、`[图片]` 等） | YAML 新增 | 原 Python `_PLACEHOLDER_EXACT_LINES` frozenset | ✅ 已实现 | **structural 层** |
+| `card_binding` | 卡片绑定参数（inside_y_tolerance_px、orphan_distance_threshold_px、thumb_block_mask_midline_ratio） | YAML 新增 | 原函数体内硬编码参数 | ✅ 已实现 | **structural 层** |
 
 > **归属层说明**：
 > - **filter 层**：逐块过滤 `_classify()` 阶段的参数，benchmark 只需对单个 block 跑 `rule_runner`（轻量）。
 > - **structural 层**：气泡合并 / 认领 / 卡片绑定 / orphan 归因等编排阶段的参数，benchmark 需跑完整 `nickname_ocr_simple` 全链路（重）。
 
-> **`rule_runner` 当前能力边界**：`run_rejection_rules()` 仅支持 `regex` / `prefix` / `length` 三种纯文本规则，输入为 `str`，不支持带 bbox 的 block 级几何判断。`geometry_rules` 如需纳入声明式执行，需先升级 `rule_runner` 支持 `type: "geometry"` 及 `OcrBlock` 输入（列入开发计划）。在升级前，几何过滤仍保留在 `_classify()` 硬编码中，不进入 `rule_runner`。
+> **`rule_runner` 能力边界**：`run_rejection_rules()` 支持 `regex` / `prefix` / `length` 三种纯文本规则（输入 `str`）。`run_block_rules()` 已新增，支持 `type: "geometry"` 及 `OcrBlock` 输入，覆盖 `horizontal_position` / `avatar_column` / `bbox_width` / `char_height_ratio` 四种几何约束。`OcrBlock` / `GeometryRuleParams` / `BlockCandidate` / `SessionInput` 等新的 Pydantic 模型已在 `models.py` 中定义。
 
 上述参数均不改变算法逻辑，仅调整数值或增删列表项。算法流程本身（如三步绑定的先后顺序、orphan 继承的遍历方向）保持硬编码，需 `scripts=true` + 编程智能体才能改动。
 
@@ -263,7 +264,7 @@ benchmark 读取逻辑：查询 `nickname_golden_label WHERE session_id=? AND sp
 
 （二）发言人结构化规则的自我进化方案
 
-### 现状：有两套「结构化」，职责不同----speaker-structurer Skill还是空壳，没补充内容没切换
+### 现状：有两套「结构化」，职责不同----speaker-structurer Skill还是空壳，没补充内容没切换。前期直接用AI读session并给出第一版规则？？？
 
 | | structurer 1: 生产管线 | structurer 2: speaker-structurer Skill |
 |---|---|---|

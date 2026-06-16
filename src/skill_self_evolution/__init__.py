@@ -8,13 +8,17 @@ Skill Engine — 自进化框架核心。
 
 from skill_self_evolution.executor import SkillExecutor
 from skill_self_evolution.models import (
+    BlockCandidate,
     CandidateInput,
     EvolvePromptYamlModel,
     EvolveTomlModel,
+    GeometryRuleParams,
+    OcrBlock,
     PromptConfigModel,
     RejectionRuleItem,
     RuleResultDict,
     RulesConfigModel,
+    SessionInput,
     SkillInput,
     SkillOutput,
 )
@@ -32,11 +36,15 @@ __all__ = [
     "SkillExecutor",
     "SkillInput",
     "SkillOutput",
+    "BlockCandidate",
     "CandidateInput",
+    "GeometryRuleParams",
+    "OcrBlock",
     "RulesConfigModel",
     "PromptConfigModel",
     "RejectionRuleItem",
     "RuleResultDict",
+    "SessionInput",
     "EvolveTomlModel",
     "EvolvePromptYamlModel",
     "get_trace_id",

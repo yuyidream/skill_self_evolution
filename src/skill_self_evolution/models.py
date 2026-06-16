@@ -147,6 +147,20 @@ class SkillInput(BaseModel, Generic[T]):
     input_data: T = Field(..., description="Business input data")
 
 
+# ── Session 目录输入 ──
+
+class SessionInput(BaseModel):
+    """session 目录定位信息。用于 executor 从 session 目录加载候选块。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    session_dir: str = Field(
+        default="",
+        description="session 目录的绝对路径（含 debug_session_derived.json 和 speaker JSON）",
+    )
+    screenshot_id: str = Field(default="", description="目标截图 ID")
+
+
 # ── Candidate file — 调用方传入的候选人 JSON ──
 
 class CandidateInput(BaseModel):
@@ -176,8 +190,8 @@ class RejectionRuleItem(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    type: Literal["regex", "prefix", "length"] = Field(
-        ..., description="规则类型：正则 / 前缀 / 长度"
+    type: Literal["regex", "prefix", "length", "geometry"] = Field(
+        ..., description="规则类型：正则 / 前缀 / 长度 / 几何约束"
     )
     action: Literal["drop", "remove_prefix"] = Field(
         default="drop", description="命中后动作"
@@ -187,6 +201,88 @@ class RejectionRuleItem(BaseModel):
     min: int = Field(default=0, ge=0, description="length 类型的最小长度")
     max: int = Field(default=999, ge=0, description="length 类型的最大长度")
     description: str = Field(default="", description="规则用途说明")
+
+
+# ── OCR block 与几何规则 ──
+
+class OcrBlock(BaseModel):
+    """OCR 识别出的单个文本块，含几何信息。
+
+    debug_session_derived.json 中 blocks[] 的单条记录。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    text: str = Field(..., description="OCR 文本")
+    bbox_xyxy: list[float] = Field(
+        default_factory=lambda: [0, 0, 0, 0],
+        description="边界框 [x1, y1, x2, y2]",
+    )
+    class_: str = Field(
+        default="",
+        alias="class",
+        description="分类标签：nickname_candidate / bubble_text / drop",
+    )
+    confidence: float = Field(default=0.0, ge=0, le=1, description="OCR 置信度")
+    band: str = Field(default="", description="所属 band ID")
+
+    @property
+    def width(self) -> float:
+        return max(0.0, self.bbox_xyxy[2] - self.bbox_xyxy[0])
+
+    @property
+    def height(self) -> float:
+        return max(0.0, self.bbox_xyxy[3] - self.bbox_xyxy[1])
+
+    @property
+    def center_x(self) -> float:
+        return (self.bbox_xyxy[0] + self.bbox_xyxy[2]) / 2
+
+    @property
+    def center_y(self) -> float:
+        return (self.bbox_xyxy[1] + self.bbox_xyxy[3]) / 2
+
+    @property
+    def left(self) -> float:
+        return self.bbox_xyxy[0]
+
+    @property
+    def top(self) -> float:
+        return self.bbox_xyxy[1]
+
+    @property
+    def right(self) -> float:
+        return self.bbox_xyxy[2]
+
+    @property
+    def bottom(self) -> float:
+        return self.bbox_xyxy[3]
+
+
+class GeometryRuleParams(BaseModel):
+    """几何规则的预计算参数。由 rule_runner 在进入 geometry 规则链前算好。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    screen_width: float = Field(default=0, description="屏幕宽度（px）")
+    screen_height: float = Field(default=0, description="屏幕高度（px）")
+    midline_y: float = Field(default=0, description="屏幕中线 y 坐标")
+    avatar_column_left: float = Field(default=0, description="头像列左边界")
+    avatar_column_right: float = Field(default=0, description="头像列右边界")
+    char_height_median: float = Field(default=0, description="当前帧字符高度中位数（px）")
+
+
+class BlockCandidate(BaseModel):
+    """从 session 目录提取的候选块，带 OcrBlock 完整信息。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    block: OcrBlock = Field(..., description="OCR 文本块")
+    source_file: str = Field(default="", description="来源文件（debug_session_derived.json）")
+    is_pipeline_selected: bool = Field(
+        default=False,
+        description="管线是否选中此 block 的 text 为最终昵称",
+    )
 
 
 # ── correctness_criteria 子段 ──
@@ -293,12 +389,21 @@ class EvolveAutoModifyModel(BaseModel):
 
 
 class EvolveGuardModel(BaseModel):
-    """guard 段 — benchmark 安全网。"""
+    """guard 段 — benchmark 安全网 + 进化阈值。"""
 
     model_config = ConfigDict(extra="allow")
 
     require_benchmark_pass: bool = Field(
         default=True, description="是否要求 benchmark 通过才保留变更"
+    )
+    min_failure_count: int = Field(
+        default=10, ge=1, description="触发进化所需的最小失败案例数"
+    )
+    max_cases_per_batch: int = Field(
+        default=20, ge=1, le=100, description="单次发送给 Evolver AI 的最大案例数"
+    )
+    dry_run: bool = Field(
+        default=False, description="dry_run 模式：仅分析不写入"
     )
 
 

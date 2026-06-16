@@ -14,15 +14,20 @@ import pytest
 from pydantic import ValidationError
 
 from skill_self_evolution.models import (
+    BlockCandidate,
     CandidateInput,
     CodeIssueModel,
+    EvolveGuardModel,
     FunctionContextModel,
     GateResultModel,
+    GeometryRuleParams,
     LayerResultModel,
+    OcrBlock,
     PromptConfigModel,
     RejectionRuleItem,
     RuleResultDict,
     RulesConfigModel,
+    SessionInput,
     EvolveTomlModel,
     EvolvePromptYamlModel,
 )
@@ -315,3 +320,119 @@ class TestGateResultModel:
     def test_feedback(self):
         gr = GateResultModel(passed=False, feedback="error message")
         assert "error" in gr.feedback
+
+
+# ── 新增：OcrBlock ──
+
+class TestOcrBlock:
+    def test_minimal(self):
+        block = OcrBlock(text="昵称A")
+        assert block.text == "昵称A"
+        assert block.bbox_xyxy == [0, 0, 0, 0]
+        assert block.class_ == ""
+        assert block.confidence == 0.0
+
+    def test_computed_properties(self):
+        block = OcrBlock(
+            text="测试",
+            bbox_xyxy=[50, 100, 250, 130],
+            class_="nickname_candidate",
+            confidence=0.95,
+            band="B1",
+        )
+        assert block.width == 200.0
+        assert block.height == 30.0
+        assert block.center_x == 150.0
+        assert block.center_y == 115.0
+        assert block.left == 50
+        assert block.top == 100
+        assert block.right == 250
+        assert block.bottom == 130
+
+    def test_extra_fields_allowed(self):
+        block = OcrBlock(text="x", extra_field=42)
+        assert block.text == "x"
+
+    def test_class_alias(self):
+        block = OcrBlock(text="x", **{"class": "nickname_candidate"})
+        assert block.class_ == "nickname_candidate"
+
+
+# ── 新增：GeometryRuleParams ──
+
+class TestGeometryRuleParams:
+    def test_defaults(self):
+        params = GeometryRuleParams()
+        assert params.screen_width == 0
+        assert params.char_height_median == 0
+
+    def test_full(self):
+        params = GeometryRuleParams(
+            screen_width=1080, screen_height=2340,
+            midline_y=1170, avatar_column_left=50,
+            avatar_column_right=120, char_height_median=28.0,
+        )
+        assert params.screen_width == 1080
+        assert params.char_height_median == 28.0
+
+
+# ── 新增：SessionInput ──
+
+class TestSessionInput:
+    def test_defaults(self):
+        si = SessionInput()
+        assert si.session_dir == ""
+        assert si.screenshot_id == ""
+
+    def test_full(self):
+        si = SessionInput(session_dir="/data/sessions/abc", screenshot_id="scr_001")
+        assert si.session_dir == "/data/sessions/abc"
+
+
+# ── 新增：BlockCandidate ──
+
+class TestBlockCandidate:
+    def test_valid(self):
+        block = OcrBlock(text="候选昵称")
+        bc = BlockCandidate(block=block, source_file="debug.json", is_pipeline_selected=True)
+        assert bc.block.text == "候选昵称"
+        assert bc.is_pipeline_selected is True
+
+    def test_default_selected(self):
+        bc = BlockCandidate(block=OcrBlock(text="x"))
+        assert bc.is_pipeline_selected is False
+
+
+# ── 新增：EvolveGuardModel 新字段 ──
+
+class TestEvolveGuardModel:
+    def test_defaults(self):
+        guard = EvolveGuardModel()
+        assert guard.min_failure_count == 10
+        assert guard.max_cases_per_batch == 20
+        assert guard.dry_run is False
+        assert guard.require_benchmark_pass is True
+
+    def test_custom(self):
+        guard = EvolveGuardModel(
+            min_failure_count=5, max_cases_per_batch=10, dry_run=True,
+        )
+        assert guard.min_failure_count == 5
+        assert guard.max_cases_per_batch == 10
+        assert guard.dry_run is True
+
+
+# ── 新增：RejectionRuleItem geometry type ──
+
+class TestRejectionRuleItemGeometry:
+    def test_geometry_type_accepted(self):
+        rule = RejectionRuleItem(
+            type="geometry",
+            action="drop",
+            description="头像列过滤",
+            constraint="avatar_column",
+            operator="lt",
+            value=100.0,
+        )
+        assert rule.type == "geometry"
+        assert rule.description == "头像列过滤"

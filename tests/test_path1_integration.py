@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 from skill_self_evolution.evolver import _deep_update, _warn_numeric_drift
-from skill_self_evolution.rule_runner import run_rejection_rules
+from skill_self_evolution.rule_runner import run_block_rules, run_rejection_rules
+from skill_self_evolution.models import GeometryRuleParams, OcrBlock
 
 # ── 测试：_apply_rules_changes deep-merge ──
 
@@ -129,6 +130,82 @@ class TestRuleRunner:
         assert run_rejection_rules("  Hello", rules) == "Hello"
         assert run_rejection_rules("[广告]", rules) is None
         assert run_rejection_rules("正常昵称", rules) == "正常昵称"
+
+
+# ── 新增：run_block_rules 几何规则 ──
+
+class TestBlockRules:
+    def test_avatar_column_drop_block_inside_col(self):
+        """头像列内 block 被 drop。"""
+        block = OcrBlock(text="昵称", bbox_xyxy=[30, 100, 100, 130])
+        params = GeometryRuleParams(avatar_column_left=0, avatar_column_right=120, screen_width=1080)
+        rules = [{"type": "geometry", "constraint": "avatar_column", "action": "drop", "operator": "lte", "value": 120}]
+        result = run_block_rules(block, rules, params)
+        assert result is None
+
+    def test_avatar_column_pass_block_outside_col(self):
+        """头像列外 block 通过。"""
+        block = OcrBlock(text="昵称", bbox_xyxy=[500, 100, 700, 130])
+        params = GeometryRuleParams(avatar_column_left=0, avatar_column_right=120, screen_width=1080)
+        rules = [{"type": "geometry", "constraint": "avatar_column", "action": "drop", "operator": "lte", "value": 120}]
+        result = run_block_rules(block, rules, params)
+        assert result is not None
+        assert result.text == "昵称"
+
+    def test_bbox_width_drop_too_narrow(self):
+        """过窄的 block 被 drop。"""
+        block = OcrBlock(text="x", bbox_xyxy=[100, 100, 112, 130])
+        rules = [{"type": "geometry", "constraint": "bbox_width", "action": "drop", "operator": "lt", "value": 20}]
+        result = run_block_rules(block, rules)
+        assert result is None
+
+    def test_bbox_width_pass(self):
+        """宽度足够的 block 通过。"""
+        block = OcrBlock(text="正常昵称", bbox_xyxy=[100, 100, 300, 130])
+        rules = [{"type": "geometry", "constraint": "bbox_width", "action": "drop", "operator": "lt", "value": 20}]
+        result = run_block_rules(block, rules)
+        assert result is not None
+
+    def test_char_height_ratio_drop(self):
+        """字符高度比值超过阈值的 block 被 drop。"""
+        block = OcrBlock(text="大字", bbox_xyxy=[100, 100, 200, 200])
+        params = GeometryRuleParams(char_height_median=30.0)
+        rules = [{"type": "geometry", "constraint": "char_height_ratio", "action": "drop", "operator": "gt", "value": 2.0}]
+        result = run_block_rules(block, rules, params)
+        assert result is None
+
+    def test_no_median_skip(self):
+        """无中位数时不触发规则。"""
+        block = OcrBlock(text="正常", bbox_xyxy=[100, 100, 200, 130])
+        rules = [{"type": "geometry", "constraint": "char_height_ratio", "action": "drop", "operator": "gt", "value": 2.0}]
+        result = run_block_rules(block, rules)  # no params → default median=0
+        assert result is not None
+
+    def test_chain_multiple_geometry_rules(self):
+        """多条几何规则链式执行。"""
+        block = OcrBlock(text="候选", bbox_xyxy=[50, 100, 250, 130])
+        params = GeometryRuleParams(screen_width=1080, char_height_median=28.0)
+        rules = [
+            {"type": "geometry", "constraint": "bbox_width", "action": "drop", "operator": "lt", "value": 20},
+            {"type": "geometry", "constraint": "char_height_ratio", "action": "drop", "operator": "gt", "value": 3.0},
+        ]
+        result = run_block_rules(block, rules, params)
+        assert result is not None
+        assert result.text == "候选"
+
+    def test_skip_non_geometry_rules(self):
+        """非 geometry 类型规则被跳过。"""
+        block = OcrBlock(text="昵称", bbox_xyxy=[100, 100, 200, 130])
+        rules = [{"type": "regex", "pattern": ".*", "action": "drop"}]
+        result = run_block_rules(block, rules)
+        assert result is not None  # regex 规则不适用于 block，跳过
+
+    def test_invalid_rule_skipped(self):
+        """非法规则被跳过不报错。"""
+        block = OcrBlock(text="昵称", bbox_xyxy=[100, 100, 200, 130])
+        rules = [{"type": "geometry"}]  # 缺少 constraint/value
+        result = run_block_rules(block, rules)
+        assert result is not None
 
 
 # ── 端到端：JSONL → Evolver 流程（dry-run） ──
