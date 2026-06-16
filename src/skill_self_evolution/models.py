@@ -328,6 +328,7 @@ class NicknameThresholdsModel(BaseModel):
     nickname_max_chars: int = Field(default=30, ge=1)
     nickname_max_char_height_ratio: float = Field(default=1.2, gt=0)
     screen_midline_ratio: float = Field(default=0.5, ge=0, le=1)
+    nickname_max_x1_ratio: float = Field(default=0.30, ge=0, le=1)
 
 
 # ── rules_config 总模型 ──
