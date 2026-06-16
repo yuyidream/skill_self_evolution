@@ -6,7 +6,7 @@
 - 写入新版本时自动归档旧版本到 skill_config_history
 - 支持回滚到任意历史版本
 
-housekeeping 项目的 VersionManager 可作为适配器实现同一接口。
+业务项目可通过提供 adapter 实现同一接口，或直接使用 ConfigVersionManager。
 """
 
 from skill_self_evolution.logging import get_logger
@@ -55,7 +55,7 @@ class ConfigVersionManager:
                 port = db.get("port", 3306)
                 user = db.get("user", "root")
                 password = db.get("password", "")
-                database = db.get("database", "housekeeping")
+                database = db.get("database", "")
             self._conn = pymysql.connect(
                 host=host,
                 port=port,

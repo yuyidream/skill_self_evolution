@@ -78,6 +78,12 @@ class LogEntry(BaseModel):
     skill_name: str = Field(default="")
     timestamp: str = Field(default="")
     is_failure: bool = Field(default=False)
+    no_valid_alternative: bool = Field(
+        default=False,
+        description="PRD §B.1: True when AI reselection failed because no reasonable "
+        "alternative exists in the candidate pool (rules incorrectly filtered out "
+        "the correct answer).",
+    )
     input_summary: dict[str, Any] = Field(default_factory=dict)
     rule_output: dict[str, Any] = Field(default_factory=dict)
     ai_validation: dict[str, Any] | None = Field(default=None)

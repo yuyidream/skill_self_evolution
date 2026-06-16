@@ -1,8 +1,9 @@
 """
-?????? ? ? APP_ENV ?? DeepSeek API ???????
+DeepSeek API 与数据库配置 — 通用，不绑定任何业务项目。
 
-- local: DeepSeek ?? API (api.deepseek.com)
-- test/prod: ??? MaaS (api.modelarts-maas.com/v2)
+调用方应显式传入参数，或通过标准环境变量覆盖：
+  DEEPSEEK_API_KEY / DEEPSEEK_API_BASE / DEEPSEEK_MODEL
+  DB_HOST / DB_PORT / DB_USER / DB_PASSWORD / DB_NAME
 """
 
 import os
@@ -24,17 +25,13 @@ class DeepSeekEnvConfig(BaseModel):
 
 
 class DbConfig(BaseModel):
-    """????????Pydantic ????"""
+    """数据库配置 Pydantic 模型。调用方应显式传入 database。"""
 
     host: str = Field(default="127.0.0.1")
     port: int = Field(default=3306, ge=1, le=65535)
     user: str = Field(default="root")
     password: str = Field(default="")
-    database: str = Field(default="housekeeping_ai_match_dev")
-
-
-def _resolve_app_env() -> str:
-    return os.getenv("APP_ENV", "local").strip().lower()
+    database: str = Field(default="")
 
 
 def get_deepseek_config(
@@ -42,25 +39,17 @@ def get_deepseek_config(
     api_base: str = "",
     model: str = "",
 ) -> DeepSeekEnvConfig:
-    env = _resolve_app_env()
     if api_key and api_base:
         return DeepSeekEnvConfig(
             api_key=api_key,
             api_base=api_base,
             model=model or "deepseek-chat",
         )
-    if env == "local":
-        key = api_key or os.getenv("DEEPSEEK_API_KEY", "")
-        base = api_base or os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
-        m = model or os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-        return DeepSeekEnvConfig(api_key=key, api_base=base, model=m)
-    else:
-        key = api_key or os.getenv("WX_MATCH_DEEPSEEK_API_KEY", "")
-        base = api_base or os.getenv(
-            "WX_MATCH_DEEPSEEK_API_BASE", "https://api.modelarts-maas.com/v2"
-        )
-        m = model or os.getenv("WX_MATCH_AI_MODEL_NAME", "DeepSeek-V3.2")
-        return DeepSeekEnvConfig(api_key=key, api_base=base, model=m)
+    return DeepSeekEnvConfig(
+        api_key=api_key or os.getenv("DEEPSEEK_API_KEY", ""),
+        api_base=api_base or os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1"),
+        model=model or os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+    )
 
 
 def get_db_config(
@@ -76,12 +65,12 @@ def get_db_config(
             port=port or 3306,
             user=user,
             password=password,
-            database=database or "housekeeping_ai_match_dev",
+            database=database or "",
         )
     return DbConfig(
         host=host or os.getenv("DB_HOST", "127.0.0.1"),
         port=port or int(os.getenv("DB_PORT", "3306")),
         user=user or os.getenv("DB_USER", "root"),
         password=password or os.getenv("DB_PASSWORD", ""),
-        database=database or os.getenv("DB_NAME", "housekeeping_ai_match_dev"),
+        database=database or os.getenv("DB_NAME", ""),
     )

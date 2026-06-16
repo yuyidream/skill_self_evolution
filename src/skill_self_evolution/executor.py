@@ -117,7 +117,7 @@ class SkillExecutor:
                 result={"error": f"配置校验失败: {e}"},
                 warnings=[f"配置校验失败: {e}"],
             )
-            self._log(effective_trace_id, True, candidates_path or session_dir, output, None, None, output, [f"配置校验失败: {e}"], elapsed)
+            self._log(effective_trace_id, True, False, candidates_path or session_dir, output, None, None, output, [f"配置校验失败: {e}"], elapsed)
             return output
 
         # 3. 降级配置
@@ -149,7 +149,7 @@ class SkillExecutor:
                 result={"error": str(e)},
                 warnings=[f"规则阶段异常: {e}"],
             )
-            self._log(effective_trace_id, True, candidates_path or session_dir, output, None, None, output, warnings, elapsed)
+            self._log(effective_trace_id, True, False, candidates_path or session_dir, output, None, None, output, warnings, elapsed)
             return output
 
         ai_validation: AiValidationResult | None = None
@@ -163,8 +163,8 @@ class SkillExecutor:
                 rule_output.ai_validated = False
                 rule_output.warnings = warnings
                 elapsed = (time.monotonic() - start_time) * 1000
-                is_failure = self._compute_is_failure(rule_output, None, None)
-                self._log(effective_trace_id, is_failure, data_source, rule_output, None, None, rule_output, warnings, elapsed)
+                is_failure, no_valid = self._compute_is_failure(rule_output, None, None)
+                self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, None, None, rule_output, warnings, elapsed)
                 return rule_output
 
             try:
@@ -178,8 +178,8 @@ class SkillExecutor:
                     elapsed = (time.monotonic() - start_time) * 1000
                     rule_output.ai_validated = False
                     rule_output.warnings = warnings
-                    is_failure = self._compute_is_failure(rule_output, None, None)
-                    self._log(effective_trace_id, is_failure, data_source, rule_output, None, None, rule_output, warnings, elapsed)
+                    is_failure, no_valid = self._compute_is_failure(rule_output, None, None)
+                    self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, None, None, rule_output, warnings, elapsed)
                     return rule_output
 
             if ai_validation and ai_validation.result == "不合理":
@@ -187,8 +187,8 @@ class SkillExecutor:
                 if fb_reselect.skip_ai:
                     warnings.extend(fb_reselect.warnings)
                     elapsed = (time.monotonic() - start_time) * 1000
-                    is_failure = self._compute_is_failure(rule_output, ai_validation, None)
-                    self._log(effective_trace_id, is_failure, data_source, rule_output, ai_validation, None, rule_output, warnings, elapsed)
+                    is_failure, no_valid = self._compute_is_failure(rule_output, ai_validation, None)
+                    self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, ai_validation, None, rule_output, warnings, elapsed)
                     return rule_output
 
                 try:
@@ -207,8 +207,8 @@ class SkillExecutor:
                             warnings=warnings,
                         )
                         elapsed = (time.monotonic() - start_time) * 1000
-                        is_failure = self._compute_is_failure(rule_output, ai_validation, ai_reselection)
-                        self._log(effective_trace_id, is_failure, data_source, rule_output, ai_validation, ai_reselection, final_output, warnings, elapsed)
+                        is_failure, no_valid = self._compute_is_failure(rule_output, ai_validation, ai_reselection)
+                        self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, ai_validation, ai_reselection, final_output, warnings, elapsed)
                         return final_output
                     else:
                         rule_output.ai_reselected = True
@@ -221,8 +221,8 @@ class SkillExecutor:
 
             rule_output.warnings = warnings
             elapsed = (time.monotonic() - start_time) * 1000
-            is_failure = self._compute_is_failure(rule_output, ai_validation, ai_reselection)
-            self._log(effective_trace_id, is_failure, data_source, rule_output, ai_validation, ai_reselection, rule_output, warnings, elapsed)
+            is_failure, no_valid = self._compute_is_failure(rule_output, ai_validation, ai_reselection)
+            self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, ai_validation, ai_reselection, rule_output, warnings, elapsed)
             return rule_output
 
         elif self.ai_role == "enhancement":
@@ -231,7 +231,7 @@ class SkillExecutor:
                 warnings.extend(fb_check.warnings)
                 rule_output.warnings = warnings
                 elapsed = (time.monotonic() - start_time) * 1000
-                self._log(effective_trace_id, False, data_source, rule_output, None, None, rule_output, warnings, elapsed)
+                self._log(effective_trace_id, False, False, data_source, rule_output, None, None, rule_output, warnings, elapsed)
                 return rule_output
 
             try:
@@ -247,20 +247,20 @@ class SkillExecutor:
                     warnings=warnings,
                 )
                 elapsed = (time.monotonic() - start_time) * 1000
-                self._log(effective_trace_id, False, data_source, rule_output, None, None, final_output, warnings, elapsed)
+                self._log(effective_trace_id, False, False, data_source, rule_output, None, None, final_output, warnings, elapsed)
                 return final_output
             except Exception as e:
                 logger.warning("Executor [%s] AI 增强异常: %s", self.skill_name, e)
                 rule_output.warnings = warnings
                 elapsed = (time.monotonic() - start_time) * 1000
-                self._log(effective_trace_id, False, data_source, rule_output, None, None, rule_output, warnings, elapsed)
+                self._log(effective_trace_id, False, False, data_source, rule_output, None, None, rule_output, warnings, elapsed)
                 return rule_output
 
         else:
             logger.warning("Executor [%s] 未知 ai_role=%s，纯规则输出", self.skill_name, self.ai_role)
             rule_output.warnings = warnings
             elapsed = (time.monotonic() - start_time) * 1000
-            self._log(effective_trace_id, False, data_source, rule_output, None, None, rule_output, warnings, elapsed)
+            self._log(effective_trace_id, False, False, data_source, rule_output, None, None, rule_output, warnings, elapsed)
             return rule_output
 
     # ── 候选池处理 ──
@@ -454,18 +454,30 @@ class SkillExecutor:
         rule_output: SkillOutput,
         ai_validation: AiValidationResult | None,
         ai_reselection: AiReselectionResult | None,
-    ) -> bool:
+    ) -> tuple[bool, bool]:
+        """Return ``(is_failure, no_valid_alternative)``.
+
+        PRD §B.1: ``no_valid_alternative=True`` when AI reselection returned
+        "不合理" — meaning no reasonable alternative exists in the candidate pool
+        (the declarative rules incorrectly filtered out the correct answer).
+        """
         if self.ai_role == "enhancement":
-            return False
+            return False, False
         if self.ai_role == "correction":
+            is_fail = False
+            no_valid = False
             if ai_validation and ai_validation.result == "不合理":
-                return True
+                is_fail = True
+                if ai_reselection and ai_reselection.result == "不合理":
+                    no_valid = True
             if ai_reselection and ai_reselection.result == "不合理":
-                return True
+                is_fail = True
+                no_valid = True
             result = rule_output.result
             if not result or result.get("error"):
-                return True
-        return False
+                is_fail = True
+            return is_fail, no_valid
+        return False, False
 
     @staticmethod
     def _render_template(template: str, context: dict) -> str:
@@ -482,6 +494,7 @@ class SkillExecutor:
         self,
         trace_id: str,
         is_failure: bool,
+        no_valid_alternative: bool,
         candidates_source: str,
         rule_output: SkillOutput,
         ai_validation: AiValidationResult | None,
@@ -497,6 +510,7 @@ class SkillExecutor:
             log_writer.log_execution(
                 trace_id=trace_id,
                 is_failure=is_failure,
+                no_valid_alternative=no_valid_alternative,
                 input_summary=input_summary,
                 rule_output=rule_output.result,
                 ai_validation=ai_validation.model_dump() if ai_validation else None,

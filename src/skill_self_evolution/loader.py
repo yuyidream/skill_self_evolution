@@ -15,18 +15,12 @@ from ruamel.yaml import YAML
 yaml_safe = YAML(typ='safe')
 yaml_rt = YAML()  # round-trip mode — 保留注释和格式，用于 dump
 
-# Skill 根目录：优先 SKILL_BASE_DIR 环境变量；兼容 housekeeping 的路径
+# Skill 根目录：优先 SKILL_BASE_DIR 环境变量，否则 fallback 到 cwd
 _skill_base_env = os.getenv("SKILL_BASE_DIR", "")
 if _skill_base_env:
     DEFAULT_SKILL_BASE = Path(_skill_base_env)
 else:
-    # 尝试相对于 housekeeping 项目根目录（兼容老部署）
-    _hk_root = Path(__file__).resolve().parents[3].parent / "housekeeping_ai_match"
-    _hk_skill = _hk_root / "backend" / "config" / "services" / "skill"
-    if _hk_skill.is_dir():
-        DEFAULT_SKILL_BASE = _hk_skill
-    else:
-        DEFAULT_SKILL_BASE = Path.cwd() / "backend" / "config" / "services" / "skill"
+    DEFAULT_SKILL_BASE = Path.cwd() / "backend" / "config" / "services" / "skill"
 
 
 class SkillModule:

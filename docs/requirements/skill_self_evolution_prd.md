@@ -98,7 +98,8 @@
 
 | 层 | 内容 | 执行策略 |
 |----|------|---------|
-| **逐块过滤层** `_classify()` | 文本规则 + 几何规则 + 头像守卫 | 声明式规则引擎（`rules_config.yaml` + `rule_runner.py`）作为**主分类路径**，`_classify_with_declarative_rules()` 统一执行 drop / 分类。config (NicknameOcrConfig) 阈值优先于 YAML（测试可覆盖），`_starts_with_system_prefix` 仅阻止昵称分类（返回 bubble_text，非 drop），水平位置与头像列守卫保持硬编码。`rules_config.yaml` 不可用时自动降级到纯硬编码。`_get_declarative_rules()` 支持 MySQL 优先、磁盘 YAML 回退、模块级缓存热加载 |
+| **逐块过滤层** `_classify()` | 文本规则 + 几何规则 + 头像守卫 | 声明式规则引擎（`rules_config.yaml` + `rule_runner.py`）作为**主分类路径**。`_classify()` 通过 `_get_declarative_rules()` 加载 YAML 规则后传入 `_classify_with_declarative_rules()`，由后者统一执行 drop / 分类。config (NicknameOcrConfig) 阈值优先于 YAML（测试可覆盖），`_starts_with_system_prefix` 仅阻止昵称分类（返回 bubble_text，非 drop），水平位置与头像列守卫保持硬编码。`rules_config.yaml` 不可用时自动降级到纯硬编码。降级逻辑直接写在代码中，无外部参数控制。降级触发条件：
+- `rules_config.yaml` 解析失败 → 降级到 `_classify()` 旧逻辑`_get_declarative_rules()` 支持 MySQL 优先、磁盘 YAML 回退、模块级缓存热加载 |
 | **结构编排层** | 气泡碎片合并、发言认领、简历卡绑定三步逻辑、orphan 归因，从候选池中选出最终昵称 | 算法流程保持硬编码，**参数**纳入 YAML 配置（见下） |
 
 `rules_config.yaml` 覆盖范围（Evolver 在 `mode=full` 下可自主改进）：
@@ -122,8 +123,7 @@
 
 上述参数均不改变算法逻辑，仅调整数值或增删列表项。算法流程本身（如三步绑定的先后顺序、orphan 继承的遍历方向）保持硬编码，需 `scripts=true` + 编程智能体才能改动。
 
-降级逻辑直接写在代码中，无外部参数控制。降级触发条件：
-- `rules_config.yaml` 解析失败 → 降级到 `_classify()` 旧逻辑
+
 - 规则过滤后候选池为空 → 降级到 `_classify()` 旧逻辑
 
 
@@ -418,7 +418,7 @@ proposal.failure_count = len(failures)
 
 | 改动 | 说明 |
 |---|---|
-| `_apply_rules_changes` 升级 deep-merge | 当前只处理 int/float，需支持列表项增删（复用已有 `_deep_update`） |
+| `_apply_rules_changes` 升级 deep-merge | 当前只处理 int/float，需支持列表字段和嵌套 dict 的合并（复用已有 `_deep_update`，列表为全量替换） |
 | 昵称选择 benchmark() 填充真实案例 | 64 条真实案例（已有 `real_failure_cases.json`），跑完整规则引擎验证 |
 | 发言人结构化 benchmark() 填充真实案例 | M 条已标注原文（从 speaker JSON 中手工标注），验证少量字段（age/hometown/job/salary）的正则提取 + AI 常识验证正确率 |
 | 昵称选择处理器读 rules_config 声明式规则 | 薄执行层消费 rejection_rules 做过滤 |
@@ -497,7 +497,7 @@ Evolver 当前只有一个 `evolve()` 方法，只读 JSONL，无 MySQL 依赖�
 
 | 序号 | 步骤 | 文件 | 改动说明 | 预估工作量 | 依赖 |
 |---|---|---|---|---|---|
-| 1 | `_apply_rules_changes` 升级 | `evolver.py` | 用 `_deep_update` 替换正则数值替换，支持列表项增删、嵌套 dict 修改 | ~10 行 | — |
+| 1 | `_apply_rules_changes` 升级 | `evolver.py` | 用 `_deep_update` 替换正则数值替换，支持列表全量替换、嵌套 dict 修改 | ~10 行 | — |
 | 2 | 新增 `rule_runner.py` | `skill_self_evolution/rule_runner.py` | 通用函数：遍历规则链，执行 regex/prefix/length 匹配 + drop/remove_prefix 动作 | ~30 行 | — |
 | 3 | 昵称选择处理器对接规则 | `skill/nickname-selector/scripts/run.py` | `_rule_extract()` 增加：读 `config["rules_config"]["rejection_rules"]`，对每条 candidate 调 `rule_runner` 过滤 | ~20 行 | 2 |
 | 4 | 昵称选择 rules_config 补充 | `backend/config/services/skill/nickname-selector/rules_config.yaml` | 新增 `rejection_rules` 列表（正则/前缀/长度），覆盖现有 `system_prefix_drops` | 纯配置 | — |
@@ -531,7 +531,7 @@ Evolver 当前只有一个 `evolve()` 方法，只读 JSONL，无 MySQL 依赖�
 
 | 编号 | 验收项 | 通过标准 | 关联步骤 |
 |---|---|---|---|
-| V1 | deep-merge 列表项增删 | 给定旧 YAML 含 `rejection_rules: [a, b]`，`changes = {"rejection_rules": [a, b, c]}`，合并后 YAML 含 `[a, b, c]` | 1 |
+| V1 | deep-merge 列表全量替换 | 给定旧 YAML 含 `rejection_rules: [a, b]`，`changes = {"rejection_rules": [a, b, c]}`，合并后 YAML 含 `[a, b, c]` | 1 |
 | V2 | deep-merge 嵌套值修改 | 给定 `nickname_thresholds.min_confidence: 0.7`，`changes = {"nickname_thresholds": {"min_confidence": 0.85}}`，合并后值为 0.85，其他字段不变 | 1 |
 | V3 | deep-merge 保留注释 | 合并后 YAML 中方原有注释不丢失 | 1 |
 | V4 | rule_runner 正则过滤 | `run_rejection_rules("警惕不实营销信息", [{type: regex, pattern: "^警惕", action: drop}])` → `None` | 2 |
@@ -541,7 +541,7 @@ Evolver 当前只有一个 `evolve()` 方法，只读 JSONL，无 MySQL 依赖�
 | V8 | 昵称选择手动新规则提升通过数 | 对 64 条案例手动写入一条新拒绝规则（如过滤时间戳格式 `\d{4}年\d{1,2}月`），benchmark 通过数应上升 | 3+4+5 |
 | V9 | 昵称选择 benchmark 返回值正确 | `benchmark(evolver)` 返回 `(pass_count, 64, [...failures])`，`pass_count > 0` 且 `total_count = 64` | 5 |
 | V10 | 发言人结构化 benchmark 返回值正确 | `benchmark(evolver)` 返回 `(pass_count, total, [...])`，`total_count ≥ 20`。仅覆盖 age/hometown/job/salary 四个字段的提取 + AI 常识验证 | 6 |
-| V11 | Evolver rules_changes deep-merge | Evolver 对 JSONL 分析后生成的 `rules_changes` 能正确 deep-merge 到 YAML（含列表项增删） | 1+8 |
+| V11 | Evolver rules_changes deep-merge | Evolver 对 JSONL 分析后生成的 `rules_changes` 能正确 deep-merge 到 YAML（列表字段为全量替换） | 1+8 |
 | V12 | Evolver 自动写入 | dry_run=False 时，rules_changes 成功写入 MySQL（rules_config.yaml 内容变更） | 1+8 |
 | V13 | Evolver 退化回滚 | 故意写入一条会导致 pass_after < pass_before 的坏规则 → 自动 rollback → proposal.rolled_back = True | 8 |
 | V14 | Evolver 正常接受 | 写入一条提升通过数的规则 → proposal.applied = True | 8 |

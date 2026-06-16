@@ -88,20 +88,20 @@ class TestSkillExecutor:
 
 
 class TestIsFailureComputation:
-    """is_failure 计算规则测试"""
+    """is_failure 计算规则测试（返回 (is_failure, no_valid_alternative) 元组）"""
 
     def test_enhancement_always_false(self):
         executor = SkillExecutor(ai_role="enhancement")
-        assert executor._compute_is_failure(SkillOutput(source="rule", result={}), None, None) is False
+        assert executor._compute_is_failure(SkillOutput(source="rule", result={}), None, None) == (False, False)
 
     def test_correction_error_result(self):
         executor = SkillExecutor(ai_role="correction")
-        assert executor._compute_is_failure(SkillOutput(source="rule", result={"error": "x"}), None, None) is True
+        assert executor._compute_is_failure(SkillOutput(source="rule", result={"error": "x"}), None, None) == (True, False)
 
     def test_correction_empty_result(self):
         executor = SkillExecutor(ai_role="correction")
-        assert executor._compute_is_failure(SkillOutput(source="rule", result={}), None, None) is True
+        assert executor._compute_is_failure(SkillOutput(source="rule", result={}), None, None) == (True, False)
 
     def test_correction_normal_result(self):
         executor = SkillExecutor(ai_role="correction")
-        assert executor._compute_is_failure(SkillOutput(source="rule", result={"result": "张三"}), None, None) is False
+        assert executor._compute_is_failure(SkillOutput(source="rule", result={"result": "张三"}), None, None) == (False, False)

@@ -48,6 +48,7 @@ class TestSkillLogger:
             logger.log_execution(
                 trace_id="exec-001",
                 is_failure=False,
+                no_valid_alternative=False,
                 input_summary={"x": "y"},
                 rule_output={"score": 58},
                 ai_validation=None,
