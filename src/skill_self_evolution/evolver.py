@@ -10,6 +10,7 @@ Evolver 离线进化器 — 读 JSONL 日志 → DeepSeek 分析失败模式 →
         execute_fn=my_execute,
         benchmark_fn=my_benchmark,
         ai_role="correction",
+        evolution_mode="both",
         evolve_toml={"evolve": {"auto_modify": {"rules_config": {"mode": "full"}}}},
         deepseek=DeepSeekClient(...),
         version_mgr=ConfigVersionManager(...),
@@ -26,7 +27,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from ruamel.yaml import YAML
 
@@ -106,12 +107,14 @@ class Evolver:
         execute_fn: Callable | None = None,
         benchmark_fn: Callable[..., tuple[int, int, list]] | None = None,
         ai_role: str = "correction",
+        evolution_mode: Literal["both", "rules_only", "prompt_only"] = "both",
         evolve_toml: dict[str, Any] | None = None,
         evolve_prompt_yaml: dict[str, Any] | None = None,
         log_dir: Path | None = None,
         rules_config_disk_path: Path | None = None,
         deepseek: DeepSeekClient | None = None,
         version_mgr=None,
+        feedback_max_rounds: int = 5,
     ):
         """
         Args:
@@ -119,17 +122,21 @@ class Evolver:
             execute_fn: 规则执行函数
             benchmark_fn: 基准测试函数  (evolver) -> (pass, total, failures)
             ai_role: "correction" | "enhancement"
+            evolution_mode: "both" | "rules_only" | "prompt_only"
             evolve_toml: evolve.toml 解析后的 dict（含 auto_modify / guard）
             evolve_prompt_yaml: AI 分析用的提示词模板 dict
             log_dir: JSONL 日志目录（默认从 skill_name 推导）
             rules_config_disk_path: rules_config.yaml 磁盘路径（用于同步）
             deepseek: DeepSeek 客户端
             version_mgr: ConfigVersionManager（MySQL 读写）
+            feedback_max_rounds: 注入到分析 prompt 的历史反馈轮数（默认 5）
         """
         self.skill_name = skill_name
         self.execute_fn = execute_fn or _default_execute
         self.benchmark_fn = benchmark_fn or _default_benchmark
         self.ai_role = ai_role
+        self.evolution_mode = evolution_mode
+        self._feedback_max_rounds = feedback_max_rounds
 
         # ── Pydantic 入口校验 ──
         if evolve_toml is not None:
@@ -195,9 +202,13 @@ class Evolver:
             logger.warning("Evolver [%s] DeepSeek 客户端未配置，无法分析", self.skill_name)
             return {}
 
+        # ── 根据 evolution_mode 选择默认模板 ──
         prompt_cfg = self.evolve_prompt_yaml or {}
         if not prompt_cfg:
-            defaults_path = _FRAMEWORK_DEFAULTS / "evolve_prompt.yaml"
+            if self.evolution_mode == "prompt_only":
+                defaults_path = _FRAMEWORK_DEFAULTS / "evolve_prompt_only.yaml"
+            else:
+                defaults_path = _FRAMEWORK_DEFAULTS / "evolve_prompt.yaml"
             if defaults_path.exists():
                 prompt_cfg = yaml_safe.load(defaults_path.read_text(encoding="utf-8")) or {}
 
@@ -206,6 +217,9 @@ class Evolver:
             "analyze_template",
             "分析以下失败案例：\n{{failure_logs}}\n输出优化建议 JSON。",
         )
+
+        # ── 加载反馈历史 ──
+        feedback_text = self._load_feedback_history()
 
         failure_texts = []
         for f in failures[:20]:
@@ -221,6 +235,7 @@ class Evolver:
 
         user_message = template
         user_message = user_message.replace("{{skill_name}}", self.skill_name)
+        user_message = user_message.replace("{{feedback_history}}", feedback_text)
         user_message = user_message.replace("{{current_rules_config}}", current_rules or "（空）")
         user_message = user_message.replace("{{current_prompt}}", current_prompt or "（空）")
         user_message = user_message.replace("{{failure_logs}}", "\n---\n".join(failure_texts))
@@ -252,9 +267,10 @@ class Evolver:
             dry_run: True=仅分析不写入，False=自动写入 MySQL
             date_str: 日期字符串，默认昨天
         """
+        mode = self.evolution_mode
         logger.info(
-            "Evolver [%s] 开始进化分析 (min_failure_samples=%d, dry_run=%s)",
-            self.skill_name, min_failure_samples, dry_run,
+            "Evolver [%s] 开始进化分析 (mode=%s, min_failure_samples=%d, dry_run=%s)",
+            self.skill_name, mode, min_failure_samples, dry_run,
         )
 
         proposal = EvolveProposal()
@@ -275,6 +291,15 @@ class Evolver:
             )
             return proposal
 
+        # ── 进化轮次号 ──
+        evolution_round = 1
+        if self._version_mgr:
+            try:
+                self._version_mgr.ensure_feedback_table()
+            except Exception as e:
+                logger.debug("Evolver [%s] 反馈表创建跳过: %s", self.skill_name, e)
+            evolution_round = self._version_mgr.get_next_evolution_round(self.skill_name)
+
         # 3. 进化前 benchmark
         logger.info("Evolver [%s] 运行进化前 benchmark...", self.skill_name)
         proposal.benchmark_before = self._run_benchmark()
@@ -283,12 +308,20 @@ class Evolver:
             self.skill_name, proposal.benchmark_before[0], proposal.benchmark_before[1],
         )
 
-        # 4. 加载当前配置
+        # 4. 加载当前配置（受 evolution_mode 控制）
         current_rules = ""
         current_prompt = ""
+        version_before = None
         if self._version_mgr:
-            current_rules = self._version_mgr.load_raw(self.skill_name, "rules_config") or ""
-            current_prompt = self._version_mgr.load_raw(self.skill_name, "prompt") or ""
+            if mode in ("both", "rules_only"):
+                current_rules = self._version_mgr.load_raw(self.skill_name, "rules_config") or ""
+                try:
+                    rules_cfg = self._version_mgr.load(self.skill_name, "rules_config")
+                    version_before = rules_cfg.get("version") if rules_cfg else None
+                except Exception:
+                    pass
+            if mode in ("both", "prompt_only"):
+                current_prompt = self._version_mgr.load_raw(self.skill_name, "prompt") or ""
 
         # 5. DeepSeek 分析
         analysis = await self._analyze_failures(failures, current_rules, current_prompt)
@@ -296,6 +329,7 @@ class Evolver:
             logger.warning("Evolver [%s] DeepSeek 分析未产出结果", self.skill_name)
             return proposal
 
+        proposal.analysis_raw = json.dumps(analysis, ensure_ascii=False, indent=2)
         proposal.rules_changes = analysis.get("rules_changes", {})
         proposal.prompt_changes = analysis.get("prompt_changes", {})
 
@@ -303,15 +337,15 @@ class Evolver:
             logger.info("Evolver [%s] DeepSeek 未提出任何优化建议", self.skill_name)
             return proposal
 
-        # 6. 生成 YAML 文本
+        # 6. 生成 YAML 文本（受 evolution_mode 控制）
         auto_cfg = self.evolve_toml.get("evolve", {}).get("auto_modify", {})
 
-        if proposal.rules_changes and auto_cfg.get("rules_config", False):
+        if proposal.rules_changes and auto_cfg.get("rules_config", False) and mode in ("both", "rules_only"):
             rules_threshold = auto_cfg.get("rules_config", {})
             max_pct = rules_threshold.get("max_change_percent", 20) if isinstance(rules_threshold, dict) else 20
             proposal.rules_text = self._apply_rules_changes(current_rules, proposal.rules_changes, max_pct)
 
-        if proposal.prompt_changes and auto_cfg.get("prompt", False):
+        if proposal.prompt_changes and auto_cfg.get("prompt", False) and mode in ("both", "prompt_only"):
             proposal.prompt_text = self._apply_prompt_changes(current_prompt, proposal.prompt_changes)
 
         # 7. 写入
@@ -320,14 +354,17 @@ class Evolver:
             require_bench = guard.get("require_benchmark_pass", True)
 
             applied = True
-            if proposal.rules_text and auto_cfg.get("rules_config", False):
+            version_after = version_before
+            if proposal.rules_text and auto_cfg.get("rules_config", False) and mode in ("both", "rules_only"):
                 proposal.rules_text, lint_errors = lint_and_fix_yaml(proposal.rules_text)
                 if lint_errors:
                     logger.warning("Evolver [%s] rules_config lint issues: %s", self.skill_name, lint_errors)
-                self._version_mgr.save(self.skill_name, "rules_config", proposal.rules_text)
+                new_ver = self._version_mgr.save(self.skill_name, "rules_config", proposal.rules_text)
+                if new_ver:
+                    version_after = new_ver
                 self._sync_rules_to_disk(proposal.rules_text)
                 logger.info("Evolver [%s] rules_config 已写入 MySQL + 同步到磁盘", self.skill_name)
-            if proposal.prompt_text and auto_cfg.get("prompt", False):
+            if proposal.prompt_text and auto_cfg.get("prompt", False) and mode in ("both", "prompt_only"):
                 proposal.prompt_text, lint_errors = lint_and_fix_yaml(proposal.prompt_text)
                 if lint_errors:
                     logger.warning("Evolver [%s] prompt lint issues: %s", self.skill_name, lint_errors)
@@ -349,12 +386,12 @@ class Evolver:
                         self.skill_name, pass_before, total_before,
                         pass_after, proposal.benchmark_after[1],
                     )
-                    if proposal.rules_text and auto_cfg.get("rules_config", False):
+                    if proposal.rules_text and auto_cfg.get("rules_config", False) and mode in ("both", "rules_only"):
                         self._version_mgr.rollback(self.skill_name, "rules_config", 0)
                         restored = self._version_mgr.load_raw(self.skill_name, "rules_config")
                         if restored:
                             self._sync_rules_to_disk(restored)
-                    if proposal.prompt_text and auto_cfg.get("prompt", False):
+                    if proposal.prompt_text and auto_cfg.get("prompt", False) and mode in ("both", "prompt_only"):
                         self._version_mgr.rollback(self.skill_name, "prompt", 0)
                     proposal.rolled_back = True
                     proposal.applied = False
@@ -362,6 +399,27 @@ class Evolver:
                     proposal.applied = True
             else:
                 proposal.applied = applied
+
+            # ── 记录反馈历史 ──
+            outcome = "rolled_back" if proposal.rolled_back else ("improved" if proposal.applied else "discarded")
+            try:
+                self._version_mgr.save_feedback(
+                    skill_name=self.skill_name,
+                    evolution_round=evolution_round,
+                    outcome=outcome,
+                    proposal_summary=self._build_proposal_summary(proposal),
+                    benchmark_before_pass=proposal.benchmark_before[0],
+                    benchmark_before_total=proposal.benchmark_before[1],
+                    benchmark_after_pass=proposal.benchmark_after[0] if proposal.benchmark_after else 0,
+                    benchmark_after_total=proposal.benchmark_after[1] if proposal.benchmark_after else 0,
+                    failure_count=proposal.failure_count,
+                    analysis_raw=proposal.analysis_raw,
+                    version_before=version_before,
+                    version_after=version_after,
+                )
+                logger.info("Evolver [%s] 反馈已记录 round=%d outcome=%s", self.skill_name, evolution_round, outcome)
+            except Exception as e:
+                logger.warning("Evolver [%s] 反馈记录失败（不影响主流程）: %s", self.skill_name, e)
 
         return proposal
 
@@ -398,6 +456,46 @@ class Evolver:
             return _yaml_dump_str(cfg)
         except Exception:
             return current_yaml
+
+    def _load_feedback_history(self) -> str:
+        """加载历史反馈记录，格式化为 prompt 可注入的文本。"""
+        if not self._version_mgr:
+            return ""
+        try:
+            history = self._version_mgr.load_feedback_history(
+                self.skill_name, max_rounds=self._feedback_max_rounds
+            )
+        except Exception as e:
+            logger.debug("Evolver [%s] 反馈历史加载失败: %s", self.skill_name, e)
+            return ""
+
+        if not history:
+            return "（无历史进化记录）"
+
+        lines = []
+        for entry in history:
+            bench_info = ""
+            if entry["benchmark_before_total"] > 0:
+                bench_info = (
+                    f" (benchmark: {entry['benchmark_before_pass']}/{entry['benchmark_before_total']}"
+                    f" → {entry['benchmark_after_pass']}/{entry['benchmark_after_total']})"
+                )
+            lines.append(
+                f"- 第 {entry['evolution_round']} 轮 [{entry['outcome']}]{bench_info}: "
+                f"{entry['proposal_summary'] or '(无摘要)'}"
+            )
+        return "\n".join(lines)
+
+    def _build_proposal_summary(self, proposal: EvolveProposal) -> str:
+        """从提案中提取摘要文本，供反馈记录。"""
+        parts = []
+        if proposal.rules_changes:
+            keys = list(proposal.rules_changes.keys())
+            parts.append(f"rules_changes: {', '.join(keys)}")
+        if proposal.prompt_changes:
+            keys = list(proposal.prompt_changes.keys())
+            parts.append(f"prompt_changes: {', '.join(keys)}")
+        return "; ".join(parts) if parts else ""
 
 
 # ── 工具函数 ──

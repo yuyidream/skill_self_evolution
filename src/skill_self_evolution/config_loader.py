@@ -98,6 +98,127 @@ class ConfigVersionManager:
             )
         logger.info("skill_config / skill_config_history 表确认存在")
 
+    def ensure_feedback_table(self) -> None:
+        """创建进化反馈记录表（幂等）。"""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS skill_evolution_feedback (
+                    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    skill_name      VARCHAR(128) NOT NULL,
+                    evolution_round INT NOT NULL COMMENT '进化轮次',
+                    outcome         ENUM('improved','discarded','rolled_back') NOT NULL,
+                    proposal_summary TEXT COMMENT 'proposal 摘要（rules_changes + prompt_changes 的简要描述）',
+                    benchmark_before_pass INT DEFAULT 0,
+                    benchmark_before_total INT DEFAULT 0,
+                    benchmark_after_pass INT DEFAULT 0,
+                    benchmark_after_total INT DEFAULT 0,
+                    failure_count   INT DEFAULT 0,
+                    analysis_raw    TEXT COMMENT 'DeepSeek 原始分析结果',
+                    version_before  INT COMMENT '进化前 rules_config 版本号',
+                    version_after   INT COMMENT '进化后 rules_config 版本号',
+                    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_skill_round (skill_name, evolution_round)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """
+            )
+        logger.info("skill_evolution_feedback 表确认存在")
+
+    def save_feedback(
+        self,
+        skill_name: str,
+        evolution_round: int,
+        outcome: str,
+        proposal_summary: str = "",
+        benchmark_before_pass: int = 0,
+        benchmark_before_total: int = 0,
+        benchmark_after_pass: int = 0,
+        benchmark_after_total: int = 0,
+        failure_count: int = 0,
+        analysis_raw: str = "",
+        version_before: int | None = None,
+        version_after: int | None = None,
+    ) -> int:
+        """记录一轮进化反馈。
+
+        Returns:
+            新插入的 feedback id
+        """
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO skill_evolution_feedback
+                   (skill_name, evolution_round, outcome, proposal_summary,
+                    benchmark_before_pass, benchmark_before_total,
+                    benchmark_after_pass, benchmark_after_total,
+                    failure_count, analysis_raw, version_before, version_after)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (
+                    skill_name, evolution_round, outcome, proposal_summary,
+                    benchmark_before_pass, benchmark_before_total,
+                    benchmark_after_pass, benchmark_after_total,
+                    failure_count, analysis_raw, version_before, version_after,
+                ),
+            )
+            feedback_id = cur.lastrowid
+        logger.info("反馈记录写入: %s round=%d outcome=%s id=%d", skill_name, evolution_round, outcome, feedback_id)
+        return feedback_id
+
+    def load_feedback_history(
+        self, skill_name: str, max_rounds: int = 5
+    ) -> list[dict]:
+        """加载最近 N 轮反馈历史。
+
+        Args:
+            skill_name: Skill 名称
+            max_rounds: 最多返回多少轮
+
+        Returns:
+            按 evolution_round 降序排列的反馈记录列表
+        """
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT evolution_round, outcome, proposal_summary,
+                          benchmark_before_pass, benchmark_before_total,
+                          benchmark_after_pass, benchmark_after_total,
+                          failure_count, version_before, version_after
+                   FROM skill_evolution_feedback
+                   WHERE skill_name = %s
+                   ORDER BY evolution_round DESC
+                   LIMIT %s""",
+                (skill_name, max_rounds),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "evolution_round": r[0],
+                "outcome": r[1],
+                "proposal_summary": r[2],
+                "benchmark_before_pass": r[3],
+                "benchmark_before_total": r[4],
+                "benchmark_after_pass": r[5],
+                "benchmark_after_total": r[6],
+                "failure_count": r[7],
+                "version_before": r[8],
+                "version_after": r[9],
+            }
+            for r in rows
+        ]
+
+    def get_next_evolution_round(self, skill_name: str) -> int:
+        """获取下一次进化的轮次号（当前最大轮次 + 1）。"""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT COALESCE(MAX(evolution_round), 0) + 1
+                   FROM skill_evolution_feedback
+                   WHERE skill_name = %s""",
+                (skill_name,),
+            )
+            return cur.fetchone()[0]
+
     def load(self, skill_name: str, config_type: str) -> dict | None:
         """从 MySQL 加载当前激活版本，返回解析后的 dict。
 

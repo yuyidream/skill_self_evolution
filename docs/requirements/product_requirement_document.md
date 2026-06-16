@@ -15,7 +15,8 @@
 | 版本号 | 修订日期 | 修订内容 | 需求提出人 | 产品经理 | 备注 |
 |--------|----------|----------|------------|----------|------|
 | V 0.1  |          | 新建     |            |          |      |
-| V 0.2  | 2026-06-16 | 阶段1+2实施：框架 geometry 规则支持、executor session_dir、EvolveGuardModel 补齐、管线 rules_config 补全、run.py session_dir、扫描旁路 JSONL hook、nickname_ocr_simple 声明式桥接（附加过滤）、进化 APScheduler 凌晨2点 | AI | AI | 测试通过 |
+| V 0.2  | 2026-06-16 | 阶段1+2实施：框架 geometry 规则支持、executor session_dir、EvolveGuardModel 补齐、管线 rules_config 补全、run.py session_dir、扫描旁路 JSONL hook、**nickname_ocr_simple 声明式桥接（主路径替换）**、进化 APScheduler 凌晨2点 | AI | AI | 测试通过 |
+| V 0.3  | 2026-06-16 | `_classify()` 声明式替换：`_classify_with_declarative_rules()` 作为主分类路径，config (NicknameOcrConfig) 阈值优先于 YAML，`_starts_with_system_prefix` 返回 bubble_text（非 drop），geometry_rules 修复 `type: geometry` 字段，YAML path `parents[3]` 修正 | AI | AI | 34/34 nickname OCR + 149/149 skill_self_evolution 全绿 |
 
 ---
 
@@ -97,18 +98,18 @@
 
 | 层 | 内容 | 执行策略 |
 |----|------|---------|
-| **逐块过滤层** `_classify()` | 文本规则 + 几何规则 + 头像守卫 | 硬编码逻辑保持原有分类决策；声明式规则引擎（`rules_config.yaml` + `rule_runner.py`）作为**附加过滤层**，对已分类的 nickname_candidate 增加额外 drop 规则。`rules_config.yaml` 无法解析时自动降级到纯硬编码。`_get_declarative_rules()` / `_declarative_should_drop()` 提供缓存式热加载 |
+| **逐块过滤层** `_classify()` | 文本规则 + 几何规则 + 头像守卫 | 声明式规则引擎（`rules_config.yaml` + `rule_runner.py`）作为**主分类路径**，`_classify_with_declarative_rules()` 统一执行 drop / 分类。config (NicknameOcrConfig) 阈值优先于 YAML（测试可覆盖），`_starts_with_system_prefix` 仅阻止昵称分类（返回 bubble_text，非 drop），水平位置与头像列守卫保持硬编码。`rules_config.yaml` 不可用时自动降级到纯硬编码。`_get_declarative_rules()` 支持 MySQL 优先、磁盘 YAML 回退、模块级缓存热加载 |
 | **结构编排层** | 气泡碎片合并、发言认领、简历卡绑定三步逻辑、orphan 归因，从候选池中选出最终昵称 | 算法流程保持硬编码，**参数**纳入 YAML 配置（见下） |
 
 `rules_config.yaml` 覆盖范围（Evolver 在 `mode=full` 下可自主改进）：
 
 | 节 | 内容 | 类型 | 原代码位置 | 实现状态 | 归属层 |
 |----|------|------|-----------|---------|-------|
-| `rejection_rules` | 文本匹配规则（regex / prefix / length） | YAML 原生 | 原 `_classify()` 内的 `_is_pure_time` 等调用链 | ✅ 已实现 | **filter 层** |
+| `rejection_rules` | 文本匹配规则（regex / prefix / length）。注意：`@` 等系统前缀由 `config.system_prefix_drops` 阻止昵称分类（→ bubble_text），不在 YAML 中直接 drop | YAML 原生 | 原 `_classify()` 内的 `_is_pure_time` 等调用链 | ✅ 已实现 | **filter 层** |
 | `nickname_thresholds` | 数值阈值（min_confidence、nickname_max_chars、screen_midline_ratio、nickname_max_x1_ratio） | YAML 扩展 | 原 `NicknameOcrConfig` 类 | ✅ 已实现 | **filter 层** |
 | `correctness_criteria` | AI 判定用的 bad_categories、verification_conditions | YAML 已有 | 不变 | ✅ 已实现 | — |
 | `ai_fallback` | AI 熔断/降级参数（timeout、重试次数、断路器阈值） | YAML 已有 | SkillExecutor 内置 | ✅ 已实现 | — |
-| `geometry_rules` | 几何约束（horizontal_position / avatar_column / bbox_width / char_height_ratio） | YAML 新增 | 原 `_classify()` 内的 `_is_on_left_half`、`_is_avatar_column_nickname_row` 等 | ✅ 已实现 | **filter 层** |
+| `geometry_rules` | 附加几何约束（bbox_width / char_height_ratio），使用 `type: geometry` 字段配合 `RejectionRuleItem` 校验 | YAML 新增 | 原 `_classify()` 内无直接对应（补充性约束），`_is_on_left_half` / `_is_avatar_column_nickname_row` 保持硬编码 | ✅ 已实现 | **filter 层** |
 | `bubble_merge` | 气泡碎片归并参数（vertical_gap_max_px、fragment_same_line_y_tol_px、fragment_horizontal_gap_max_px） | YAML 新增 | 原 `NicknameOcrConfig` 类 | ✅ 已实现 | **structural 层** |
 | `placeholder_lines` | 发言正文占位行剔除列表（如 `[语音]`、`[图片]` 等） | YAML 新增 | 原 Python `_PLACEHOLDER_EXACT_LINES` frozenset | ✅ 已实现 | **structural 层** |
 | `card_binding` | 卡片绑定参数（inside_y_tolerance_px、orphan_distance_threshold_px、thumb_block_mask_midline_ratio） | YAML 新增 | 原函数体内硬编码参数 | ✅ 已实现 | **structural 层** |
@@ -229,11 +230,19 @@ benchmark 执行路径分两级（取决于 Evolver 改动触及哪些节）：
 
 > **当前可用范围**：`rule_runner` 仅支持 `regex` / `prefix` / `length` 三种纯文本规则。Evolver 现阶段仅能优化已实现的 filter 层文本规则。`geometry_rules` 需先升级 `rule_runner`（列入开发计划）。
 
-（2）当 Evolver 提出代码级规则时，
-通知编程智能体（local 环境默认开启使用 Cursor，test/prod 暂不提供；每个环境的`scripts = true` 且 `enable_nickname_evolution = true`时才允许使用），由其调用 `test-collector-customized-for-renxin` SKILL，生成新代码，然后按如下 4 层约束验证生成的代码：
+
+（2）当 Evolver 提出代码级规则时，如果符合条件（local 环境默认开启使用 ，test/prod 暂不提供；每个环境的`scripts = true` 且 `enable_nickname_evolution = true`时才允许使用），
+Evolver 通过以下闭环流程生成和改进代码：
+
+a) **代码生成（OpenCode）**：通过 EvoSkill 的 OpenCode harness 调用 `opencode serve` HTTP API，使用 DeepSeek (`deepseek-chat`) 模型生成代码。调用方式为 `execute_query(options, prompt)`（详见 `E:\projects\skill_self_evolution\docs\adr\opencode_harness_assessment.md`），每次传入当前代码上下文 + 反馈历史（历史失败尝试及原因），AI 返回 ` ```python ``` ` 代码块。
+`FeedbackDescent` 算法,驱动多轮迭代。loop_config.py进化循环统一配置/parallel_eval.py并行评测，提供有力辅助（复用EvoSkill的代码自主进化功能的分析参见E:\projects\skill_self_evolution\docs\adr\prompt_evolution_enhancement.md）。
+
+b) **测试验证（`E:\projects\collector_phone_android\.cursor\skills\test-collector-customized-for-renxin` SKILL）**：生成的代码由cursor调用该 SKILL 执行自动化测试，每次失败时将错误信息 / 失败原因喂回 AI 作为下一轮反馈。日志通过 `structlog` 输出
+
+按如下 4 层约束验证生成的代码：
 
     1. 静态检查。Python 标准库 ast 模块做静态代码检查（包括但不限于超长条件链 / 裸 except / 修改 global / 日志在 for 循环内 / 异常不吞没等 AST 检查），失败就重写（错误信息喂回）。
-    2. 单元测试。AI 自己写自己测，失败就重写（错误信息喂回）。以后由必要时改为自己写，其它AI测。
+    2. 单元测试。opencode写，cursor测，失败就重写（错误信息喂回）。
     3. 集成测试。要求新代码必须和该模块有接口的其它系统/业务模块（这个提前就知道，写入`test-collector-customized-for-renxin` SKILL 知识库），产生直接或者间接的关联。实际是强制参加集成测试 + 测试覆盖率门禁。任何一个失败就重写（错误信息喂回）。
     4. 生产环境测试。跑所有验证集数据。失败则重写（错误信息喂回）。
 
@@ -265,6 +274,8 @@ benchmark 读取逻辑：查询 `nickname_golden_label WHERE session_id=? AND sp
 （二）发言人结构化规则的自我进化方案
 
 ### 现状：有两套「结构化」，职责不同----speaker-structurer Skill还是空壳，没补充内容没切换。前期直接用AI读session并给出第一版规则？？？
+
+复用EvoSkill的prompt自主进化功能的分析参见E:\projects\skill_self_evolution\docs\adr\prompt_evolution_enhancement.md
 
 | | structurer 1: 生产管线 | structurer 2: speaker-structurer Skill |
 |---|---|---|

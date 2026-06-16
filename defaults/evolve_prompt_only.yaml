@@ -1,0 +1,54 @@
+system: |
+  你是 prompt 工程专家。分析 Skill 执行日志中的失败案例，只优化 AI prompt 的措辞和逻辑。
+  不要修改 rules_config 的任何内容。
+
+analyze_template: |
+  Skill：{{skill_name}}
+
+  历史进化反馈（最近几轮的高层摘要，包含改动内容和效果）：
+  {{feedback_history}}
+
+  当前 prompt：{{current_prompt}}
+
+  失败案例（is_failure=true 的记录）：
+  {{failure_logs}}
+
+  请从 prompt 层面分析改进方向：
+
+  1. system_prompt 是否需要更清晰的角色定义？
+     - 当前角色描述是否足够精确？
+     - 是否需要补充领域知识（如家政匹配术语、昵称格式惯例）？
+
+  2. user_template_validate 判断逻辑是否需要修正？
+     - 判断标准是否过于宽松/严格？
+     - 是否需要增加新的判断维度（如卡片布局、昵称位置上下文、纵向筒归属）？
+     - 是否需要给出具体的通过/不通过示例？
+
+  3. user_template_reselect 重选逻辑是否需要改进？
+     - 候选列表的排序或筛选规则是否合理？
+     - 是否需要增加「不确定则不选」的保守策略？
+     - 是否需要增加对候选人质量的多维度评估（如置信度、位置、上下文一致性）？
+
+  4. 是否需要新增 examples 字段来引导 AI 行为？
+     - 提供正面示例（正确选择的模式）
+     - 提供反面示例（容易误判的陷阱）
+
+  5. 措辞和格式是否清晰无误导？
+     - 是否有歧义表述？
+     - 约束条件是否完整？
+
+  输出 JSON（直接可解析，不要 markdown 包裹）：
+  {
+    "prompt_changes": {
+      "system_prompt": "新的系统提示词（或省略不改）",
+      "user_template_validate": "新的验证提示词样本（或省略不改）",
+      "user_template_reselect": "新的重选提示词样本（或省略不改）",
+      "examples": ["示例1", "示例2"]
+    }
+  }
+
+  注意：
+  - 仅修改真正需要改变的字段，未改变的字段完全省略
+  - 保持 YAML 模板变量 {{result}} / {{candidates}} 等不变
+  - 若历史反馈中已有类似改动被 discarded 或 rolled_back，不要重复尝试相同方向
+  - 不要输出 rules_changes 字段

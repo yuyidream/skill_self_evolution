@@ -4,6 +4,10 @@ system: |
 
 analyze_template: |
   Skill：{{skill_name}}
+
+  历史进化反馈（最近几轮的高层摘要，包含改动内容和效果）：
+  {{feedback_history}}
+
   当前 rules_config：{{current_rules_config}}
   当前 prompt：{{current_prompt}}
 
@@ -36,3 +40,4 @@ analyze_template: |
   - 若无需变更某类配置，对应字段可省略或设为空对象
   - rules_changes 使用 deep-merge 语义：列表整体替换，字典按路径递归合并
   - correctness_criteria.bad_categories 中每条需含 name / description / patterns（正则数组）
+  - 若历史反馈中已有类似改动被 discarded 或 rolled_back，不要重复尝试相同方向

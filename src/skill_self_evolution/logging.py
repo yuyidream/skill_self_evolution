@@ -8,24 +8,45 @@
     logger.info("event_name", key=value)
     logger.info("msg with %s", arg)
     logger.warning("event", exc_info=True)
+
+默认使用 ConsoleRenderer。设置环境变量 STRUCTLOG_JSON=true 可切换为 JSONRenderer。
 """
 
+import os
 import structlog
 
-structlog.configure(
-    processors=[
+_is_configured = False
+
+
+def _configure_default():
+    global _is_configured
+    if _is_configured:
+        return
+    _is_configured = True
+
+    processors = [
         structlog.stdlib.filter_by_level,
         structlog.stdlib.add_logger_name,
         structlog.stdlib.add_log_level,
         structlog.stdlib.PositionalArgumentsFormatter(),
         structlog.processors.TimeStamper(fmt="iso"),
-        structlog.dev.ConsoleRenderer(),
-    ],
-    context_class=dict,
-    logger_factory=structlog.stdlib.LoggerFactory(),
-    wrapper_class=structlog.stdlib.BoundLogger,
-    cache_logger_on_first_use=True,
-)
+    ]
+
+    if os.environ.get("STRUCTLOG_JSON", "").lower() == "true":
+        processors.append(structlog.processors.JSONRenderer())
+    else:
+        processors.append(structlog.dev.ConsoleRenderer())
+
+    structlog.configure(
+        processors=processors,
+        context_class=dict,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        wrapper_class=structlog.stdlib.BoundLogger,
+        cache_logger_on_first_use=True,
+    )
+
+
+_configure_default()
 
 
 def get_logger(name: str = ""):
