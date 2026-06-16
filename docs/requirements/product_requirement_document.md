@@ -55,8 +55,8 @@
 ```
 ┌───────────────────────────────┐  ┌───────────────────────────────────┐
 │  数据处理规则结果判断            │  │  prompt结果判断                     │
-│  Skill A: nickname-selector    │  │  Skill B: match-scorer             │
-│  Skill C: speaker-structurer   │  │                                    │
+│  昵称选择                      │  │  匹配评分                          │
+│  发言人结构化                    │  │                                    │
 │                                │  │  AI 按 prompt 返回语义分 (0-22)     │
 │  候选池 → 规则引擎 → 最终数据    │  │         ↓                          │
 │         ↓                      │  │  H5 页面展示匹配结果                │
@@ -84,16 +84,260 @@
 
 框架有两条并列的上游链路，共同接入 Evolver（离线进化）：
 
-**上游1：数据处理规则结果判断**（Skill A: nickname-selector / Skill C: speaker-structurer）。调用方提供候选池数据（candidates），SkillExecutor 管线的规则阶段通过声明式规则引擎（rules_config.yaml）+ 薄执行层（run.py）从候选池中筛选并产出 result（规则确认的最终数据）。若 AI 验证（DeepSeek 按 prompt.yaml 常识判断）判定 result 不合理，则从候选池中重选最佳替代，并写 JSONL 日志标记 `is_failure=true`。Evolver 读取 JSONL 失败案例，经 DeepSeek 分析后优化 rules_config.yaml，通过 benchmark 确定性对比决定自动接受或回滚。
+**上游1：数据处理规则结果判断**（昵称选择 / 发言人结构化）。
 
-**上游2：prompt结果判断**（Skill B: match-scorer）。AI 按 prompt 对简历-订单匹配进行语义评分（0-22 分），结果在 H5 页面展示。用户点击「匹配不正确」（可选补充不正确的原因）后写入 wx_match_feedback 表。Evolver 读取用户负面反馈，经 DeepSeek 分析后优化 prompt.yaml（需人工确认，因 prompt 结果具有概率性），同时可优化 rules_config 中各维度的分值与权重。
+（一）昵称选择模型（规则）的自我进化方案：
+
+### 管线内的规则执行（始终运行，无需开关）
+
+声明式规则引擎由两部分组成：**`rules_config.yaml`**（规则定义）+ **`rule_runner.py`**（薄执行层）。用于替代 `nickname_ocr_simple.py` 中 `_classify()` 的旧硬编码实现：对每个 OCR text block 逐块分类（`nickname_candidate` / `bubble_text` / `drop`），结构编排层再从候选池中选出最终昵称。
+
+`nickname_ocr_simple.py`（已有旧管线文件，路径 `scripts/wx_match/processor/nickname_ocr_simple.py`）的内部逻辑分两层：
+
+| 层 | 内容 | 执行策略 |
+|----|------|---------|
+| **逐块过滤层** `_classify()` | 文本规则 + 几何规则 + 头像守卫 | 替换为声明式规则引擎（`rules_config.yaml` + `rule_runner.py`）；逐块分类产出候选池，`rules_config.yaml` 无法解析时自动降级到旧硬编码 |
+| **结构编排层** | 气泡碎片合并、发言认领、简历卡绑定三步逻辑、orphan 归因，从候选池中选出最终昵称 | 算法流程保持硬编码，**参数**纳入 YAML 配置（见下） |
+
+`rules_config.yaml` 覆盖范围（Evolver 在 `mode=full` 下可自主改进）：
+
+| 节 | 内容 | 类型 | 原代码位置 | 实现状态 | 归属层 |
+|----|------|------|-----------|---------|-------|
+| `rejection_rules` | 文本匹配规则（regex / prefix / length） | YAML 原生 | 原 `_classify()` 内的 `_is_pure_time` 等调用链 | ✅ 已实现 | **filter 层** |
+| `nickname_thresholds` | 数值阈值（min_confidence、nickname_max_chars、screen_midline_ratio、nickname_max_x1_ratio） | YAML 扩展 | 原 `NicknameOcrConfig` 类 | ✅ 已实现 | **filter 层** |
+| `correctness_criteria` | AI 判定用的 bad_categories、verification_conditions | YAML 已有 | 不变 | ✅ 已实现 | — |
+| `ai_fallback` | AI 熔断/降级参数（timeout、重试次数、断路器阈值） | YAML 已有 | SkillExecutor 内置 | ✅ 已实现 | — |
+| `geometry_rules` | 几何约束（horizontal_position / avatar_column / bbox_width / char_height_ratio） | YAML 新增 | 原 `_classify()` 内的 `_is_on_left_half`、`_is_avatar_column_nickname_row` 等 | ⬜ 计划新增 | **filter 层** |
+| `bubble_merge` | 气泡碎片归并参数（vertical_gap_max_px、fragment_same_line_y_tol_px、fragment_horizontal_gap_max_px） | YAML 新增 | 原 `NicknameOcrConfig` 类 | ⬜ 计划新增 | **structural 层** |
+| `placeholder_lines` | 发言正文占位行剔除列表（如 `[语音]`、`[图片]` 等） | YAML 新增 | 原 Python `_PLACEHOLDER_EXACT_LINES` frozenset | ⬜ 计划新增 | **structural 层** |
+| `card_binding` | 卡片绑定参数（inside_y_tolerance_px、orphan_distance_threshold_px、thumb_block_mask_midline_ratio） | YAML 新增 | 原函数体内硬编码参数 | ⬜ 计划新增 | **structural 层** |
+
+> **归属层说明**：
+> - **filter 层**：逐块过滤 `_classify()` 阶段的参数，benchmark 只需对单个 block 跑 `rule_runner`（轻量）。
+> - **structural 层**：气泡合并 / 认领 / 卡片绑定 / orphan 归因等编排阶段的参数，benchmark 需跑完整 `nickname_ocr_simple` 全链路（重）。
+
+> **`rule_runner` 当前能力边界**：`run_rejection_rules()` 仅支持 `regex` / `prefix` / `length` 三种纯文本规则，输入为 `str`，不支持带 bbox 的 block 级几何判断。`geometry_rules` 如需纳入声明式执行，需先升级 `rule_runner` 支持 `type: "geometry"` 及 `OcrBlock` 输入（列入开发计划）。在升级前，几何过滤仍保留在 `_classify()` 硬编码中，不进入 `rule_runner`。
+
+上述参数均不改变算法逻辑，仅调整数值或增删列表项。算法流程本身（如三步绑定的先后顺序、orphan 继承的遍历方向）保持硬编码，需 `scripts=true` + 编程智能体才能改动。
+
+降级逻辑直接写在代码中，无外部参数控制。降级触发条件：
+- `rules_config.yaml` 解析失败 → 降级到 `_classify()` 旧逻辑
+- 规则过滤后候选池为空 → 降级到 `_classify()` 旧逻辑
+
+
+
+### 数据源——session 目录
+
+所有数据以 session 目录为单位，格式：
+
+```
+build/wx_match_sessions/wechat/{device_id}/{YYYYMMDD}/session_{session_id}/
+```
+
+示例：`build/wx_match_sessions/wechat/edb1a89f/20260613/session_20260613113935_edb1a89f/`
+
+目录内关键文件：
+
+| 文件 | 用途 | 写入者 |
+|------|------|--------|
+| `debug_session_derived.json` | OCR 分类结果，`blocks[]` 含 `class: "nickname_candidate"` 的候选池（每条带 text / bbox_xyxy / confidence / band） | Scanner 管线 |
+| `{昵称}_{时间戳}.json`（speaker JSON） | 发言人绑定，`md5_spokesperson.speaker_binding_raw` 为管线最终选中的昵称 | MQ Consumer |
+| `customer_metadata.json` | 含 `resume_thumb_bboxes`、`click_context`、`screenshots[].type` 等几何上下文（仅 Evolver 进化AI 使用） | Scanner 管线 |
+| `metadata.json` | 采集元数据（本方案不直接使用） | Collector |
+
+- local 环境：数据在本地 `build/wx_match_sessions/` 下，宿主机和 Docker 容器通过 bind mount 共享。
+- test/prod 环境：数据在华为云 OBS（bucket `wx-screenshot` / `test-sync-obs`），路径前缀 `wechat/`。下载到本地后目录结构与 local 一致。Evolver 运行时通过 `wx_session_processed.obs_prefix` 定位 OBS key，再从 OBS 拉取到本地。
+
+### 自我进化旁路（通过local/test/prod env参数来实现开关）
+
+上述管线内的规则执行与降级始终运行于管线中，与自我进化开关无关。
+
+env文件里的 `enable_nickname_evolution` 参数作为开关，只控制管线跑完后是否触发自我进化旁路，开启后 `create_scanner_process_fn()` 会执行后续动作。
+以下几种方式可以实现开关的动作（`false` 为关闭，`true` 为开启。local环境默认开启，test/prod环境默认关闭）：
+- CLI 参数 `--enable-nickname-evolution` 和 `--disable-nickname-evolution`（`run_scanner_minimal.py` 使用），本次调用立即开启/关闭
+- `test-collector-customized-for-renxin` SKILL 收到"开启/关闭昵称选择规则的自我进化"指令时，直接修改 `.env` 中 `enable_nickname_evolution` 为 `true` 或 `false`。
+
+#### 扫描旁路（每次 `process_session()` 完成后触发）
+
+开关为 `true` 时，每次扫描结束后执行：
+
+1. 定位 session 目录下的 speaker JSON 文件（格式 `{昵称}_{时间戳}.json`）→ 读取 `md5_spokesperson.speaker_binding_raw`（管线的最终选择）。AI 始终以管线实际输出作为判断对象——Golden label 不替代 AI 输入，仅用于 Evolver benchmark 时的正确性对照。
+2. 读取 `debug_session_derived.json` → 提取所有 `class: "nickname_candidate"` 的 block 的 `text` 字段 → 候选池文本列表。
+3. 调用 `SkillExecutor.run(session_dir, prompt_config)`，
+   将候选池文本 + 管线选中的昵称交给“昵称选择结果判断AI”（当前接入DeepSeek，按 `prompt.yaml` 常识判断）：
+   管线选出的昵称是否正确、合理。
+   “规则结果判断AI”仅凭人类常识判断，不看当前规则配置，也不看 bbox / band / customer_metadata 等几何数据。
+
+若昵称选择结果判断AI判定 result 不合理：
+- 优先从候选池中重选最佳替代；
+- 若候选池中不存在合理选项（规则误将正确答案过滤掉），标记 `no_valid_alternative=true`。
+以上两种均写 JSONL 日志标记 `is_failure=true`（日志带 `session_dir` 字段，指向 session 目录）。
+若合理，标记 `is_failure=false`。
+
+
+#### Evolver训练集和验证集
+由 Evolver 在每晚进化定时任务里构建
+
+**数据源与 Evolver 共用同一 `log_dir`（`/data/skill-logs/{skill_name}/`）。为防止循环自证，错误集拆分为训练集和验证集：**
+
+- **Golden set `golden_set_nickname_evolution`**：少量人工标注正确答案。每个案例是一个完整的 session 目录（包含 `debug_session_derived.json` + speaker JSON），随OBS 存储。正向案例（管线已选对的）无需额外标注；纠错案例（管线选错的）通过 MySQL 表 `nickname_golden_label` 记录正确答案（`session_id` + `speaker_json_file` → `golden_nickname`，`label_type='correction'`）。详见附录「Golden set 标注表」。
+- **训练集 `training_set_nickname_evolution`**（给 Evolver 分析规则缺陷）：历史 `is_failure=true` 中排除当天的新增错误。每个案例通过 JSONL 中的 `session_dir` 定位 session 目录。
+- **验证集 `validation_nickname_evolution`**（给 `benchmark_fn` 验收）：**仅 Golden set**。未经验证的 `is_failure=false` 案例不进入验证集——AI 可能误判（false negative），将 AI 错误判断作为正确基准会污染进化方向。
+
+整个流程**不生成中间文件**——规则结果判断AI、Evolver 进化AI、benchmark 均直接读取 session 目录下的原始文件。
+
+两个 AI 角色的数据需求对比：
+
+| | 昵称选择结果判断AI | Evolver 规则进化AI |
+|---|---|---|
+| 候选池文本 | ✅ `nickname_candidate` 的 text 列表 | ✅ |
+| 管线选中昵称 | ✅ `speaker_binding_raw` | ✅ |
+| bbox / band / confidence | ❌ 不需要，凭常识判断 | ✅ 需要，分析空间关系与规则缺陷 |
+| `resume_thumb_bboxes` | ❌ 不需要 | ✅ 需要，分析卡片绑定规则 |
+| `click_context` | ❌ 不需要 | ✅ 需要，验证点击精度 |
+| 截图图片 | ❌ DeepSeek 纯文本模型 | ❌ 同上，当前无法利用 |
+
+
+#### 每晚进化定时任务 `nickname_evolution`
+
+`nickname_evolution` 是独立的 APScheduler 定时任务（后台常驻，每天晚间执行一次），
+启动时读取 `enable_nickname_evolution` 参数，为 `true` 时才执行进化流程：
+
+Evolver 先构建训练集和验证集，
+然后读取 JSONL 失败案例，失败案例数量达到阈值后（默认≥10，可配置），让 “Evolver 规则进化AI”（当前接入DeepSeek），根据 `evolve_prompt.yaml` 的提示词，分析当前 `rules_config.yaml` 哪里导致误判，然后优化已有规则或提出新规则。
+`evolve_prompt.yaml` 的输入包括：当前 `rules_config.yaml` + 失败案例的 `debug_session_derived.json`（通过 JSONL 中的 `session_dir` 定位）+ 可选 `customer_metadata.json`（提供 bbox、click_context 等几何上下文）。
+
+数据定位链路：JSONL 中的 `session_dir` → 本地路径直接读取；若为 OBS 路径，通过 `session_id` 查 `wx_session_processed.obs_prefix` 从 OBS 下载。
+
+Evolver 提出的规则分两类，由 `evolve.toml` 的 `[evolve.auto_modify]` 节控制（Evolver 通过 benchmark 确定性对比决定自动接受或回滚）：
+
+- **纯配置规则**：仅改动 `rules_config.yaml`（如新增拒绝规则、调整阈值、补充 correctness_criteria）。始终允许（`rules_config.mode = "full"`）。
+- **代码级规则**：需要修改下游代码才能生效（如新增参数 `min_overlap_area_ratio`，`nickname_ocr_simple.py` 需新增消费逻辑）。由 `scripts = true/false` 开关控制（local环境默认开启，test/prod环境默认关闭）。
+
+（1）当 Evolver 提出纯配置规则时，调用 `benchmark_fn`（调用方注入）获取确定性对比数据。
+
+`benchmark_fn` 读验证集（仅 Golden set）→ 对每个 case 通过 JSONL 中的 `session_dir` 定位 session 目录 → 用新规则重跑过滤 → 对比 Golden set 已知正确答案 → 返回 `(通过数, 总数, 失败列表)`。Evolver 比较改动前后通过数，决定接受或回滚。
+
+benchmark 执行路径分两级（取决于 Evolver 改动触及哪些节）：
+
+| 改动涉及的节 | benchmark 执行路径 | 是否需要完整管线 |
+|---|---|---|
+| `rejection_rules`、`correctness_criteria.bad_categories`、`nickname_thresholds`（filter 层） | 仅对候选池文本调 `rule_runner.run_rejection_rules()` | 否（轻量，无需重跑 OCR） |
+| `geometry_rules`（filter 层，⬜ 计划新增） | 需 `rule_runner` 升级支持 `OcrBlock` 输入后方可 benchmark（当前 `rule_runner` 仅处理纯文本 `str`，不支持 bbox 位置判断） | 否（单个 block） |
+| `bubble_merge`、`placeholder_lines`、`card_binding`（structural 层） | 需跑完整 `nickname_ocr_simple` 全链路（气泡合并→认领→卡片绑定→orphan 归因） | 是（重） |
+
+> **当前可用范围**：`rule_runner` 仅支持 `regex` / `prefix` / `length` 三种纯文本规则。Evolver 现阶段仅能优化已实现的 filter 层文本规则。`geometry_rules` 需先升级 `rule_runner`（列入开发计划）。
+
+（2）当 Evolver 提出代码级规则时，
+通知编程智能体（local 环境默认开启使用 Cursor，test/prod 暂不提供；每个环境的`scripts = true` 且 `enable_nickname_evolution = true`时才允许使用），由其调用 `test-collector-customized-for-renxin` SKILL，生成新代码，然后按如下 4 层约束验证生成的代码：
+
+    1. 静态检查。Python 标准库 ast 模块做静态代码检查（包括但不限于超长条件链 / 裸 except / 修改 global / 日志在 for 循环内 / 异常不吞没等 AST 检查），失败就重写（错误信息喂回）。
+    2. 单元测试。AI 自己写自己测，失败就重写（错误信息喂回）。以后由必要时改为自己写，其它AI测。
+    3. 集成测试。要求新代码必须和该模块有接口的其它系统/业务模块（这个提前就知道，写入`test-collector-customized-for-renxin` SKILL 知识库），产生直接或者间接的关联。实际是强制参加集成测试 + 测试覆盖率门禁。任何一个失败就重写（错误信息喂回）。
+    4. 生产环境测试。跑所有验证集数据。失败则重写（错误信息喂回）。
+
+4层全部通过后，将 `(通过数, 总数, 失败列表)` 返给 Evolver。
+Evolver 比较改动前后通过数，决定接受或回滚。回滚时企微报警。
+
+#### 附录：Golden set 标注表
+
+```sql
+CREATE TABLE IF NOT EXISTS nickname_golden_label (
+    id                BIGINT AUTO_INCREMENT PRIMARY KEY,
+    session_id        VARCHAR(64)  NOT NULL COMMENT '对应 wx_session_processed.session_id',
+    speaker_json_file VARCHAR(256) NOT NULL COMMENT 'Speaker JSON 文件名（如 梦仙居慕兮老师_2026061311421076.json）',
+    golden_nickname   VARCHAR(128) NOT NULL COMMENT '人工标注的正确昵称',
+    label_type        ENUM('correction','verification') NOT NULL COMMENT 'correction=管线选错了, verification=管线选对了',
+    annotated_by      VARCHAR(64)  DEFAULT NULL,
+    annotated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    note              VARCHAR(512) DEFAULT NULL,
+    UNIQUE KEY uk_session_file (session_id, speaker_json_file)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+- `label_type='verification'`：正向案例，`golden_nickname` 与管线 `speaker_binding_raw` 一致，仅做人工确认留痕。
+- `label_type='correction'`：纠错案例，`golden_nickname` 为正确答案，用于驱动 Evolver 修复规则。
+
+benchmark 读取逻辑：查询 `nickname_golden_label WHERE session_id=? AND speaker_json_file=?`，有记录则取 `golden_nickname`，无记录则 fallback 到 speaker JSON 的 `speaker_binding_raw`。
+
+
+（二）发言人结构化规则的自我进化方案
+
+### 现状：有两套「结构化」，职责不同----speaker-structurer Skill还是空壳，没补充内容没切换
+
+| | structurer 1: 生产管线 | structurer 2: speaker-structurer Skill |
+|---|---|---|
+| **代码位置** | `RuleStructuringService`（~1350 行） | `backend/config/services/skill/speaker-structurer/` |
+| **规则来源** | `structuring_classification_v1` / `shared_v1` / `order_v1` / `resume_v1`（四资产合并，由 VersionManager 热加载） | `rules_config.yaml`（~30 行，6 个字段各 1-3 条 regex） |
+| **规则规模** | 数百条 pattern + canonical 别名表 + 地铁站正则 + negation_words + 学历映射… | 6 个字段：nickname / age / hometown / job / salary / experience |
+| **后处理** | 重：`_build_order_item` / `_build_resume_item` 内做整数解析、手机号清洗、alias 映射、dict 编码、range check 等 | 无（正则捕获后直接返回） |
+| **落地目标** | MySQL `wx_resume` / `wx_order` 生产表 | 未接线（`speaker-structurer` 从未被扫描器或 MQ 消费者调用） |
+| **覆盖字段** | 几十个业务字段（工种、岗位、手机、学历、身高、驾照、省市区、地铁站、薪资上下限…） | 6 个（且字段名与生产表不对齐：`job` vs `job_code`、`hometown` vs `province`） |
+
+### 设计意图
+
+原来的计划：像 nickname-selector 替代 `_classify()` 一样，speaker-structurer 作为**声明式规则引擎**替代 `structuring_*_v1` 的生产角色，现有四资产 `RuleStructuringService` 作为硬代码降级。Evolver 在旁路验证并自动优化 `rules_config.yaml` 中的 pattern。
+
+### 差距分析：当前不可行
+
+nickname-selector 替代 `_classify()` 能成立的前提是被替代物足够简单（一个纯函数，输出 3 种分类标签）。但 `structuring_*_v1` 完全不满足这个前提：
+
+| 对比维度 | nickname-selector | speaker-structurer（若要替代 structuring_*_v1） |
+|---|---|---|
+| **被替代物** | `_classify()` 纯函数 | `RuleStructuringService.classify_and_extract()` + `_build_*` 后处理链 |
+| **后处理** | 无 | 整数解析、phone 清洗、alias 映射、dict 编码、range check、地铁站后缀处理… |
+| **降级复杂度** | 调用一个函数 | 切换整个执行框架（SkillExecutor vs RuleStructuringService） |
+| **出错影响** | 昵称显示错误（H5 可修复） | 年龄/薪资写错 → 匹配全盘错（不可逆） |
+| **数据来源** | OCR block（有 bbox/confidence/band 等丰富信号） | 纯文本（无几何信号辅助判断） |
+
+在补全到与 `structuring_*_v1` 同等成熟度之前（意味着重写 `RuleStructuringService` 的后处理链），让 Evolver 自动修改 pattern 是危险的。
+
+### 务实路径：分三阶段
+
+**阶段 1（近期，可在路径 1 闭环内做）：AI 验证旁车**
+
+speaker-structurer 不替代生产管线，而是作为**旁路质检**：
+
+- 输入：`structuring_*_v1` 从 speaker JSON 原文中提取的结构化字段
+- 规则：`rules_config.yaml` 中的少量 regex（age / hometown / job / salary 等）
+- AI：常识判断字段合理性（年龄 52 合理、999 不合理；籍贯「湖南」合理、「月亮」不合理）
+- 输出：`is_failure` 标志 → JSONL → Evolver 可优化 `rules_config.yaml` 中的 pattern
+
+这一阶段的 `rules_config.yaml` 范围很小（仅几个字段的验证规则），优化风险可控。
+
+**阶段 2（中期）：字段提取规则进化**
+
+在阶段 1 的 benchmark 积累足够（≥50 条标注案例）后，Evolver 可小范围优化 extraction pattern：
+
+- 可控范围：`field_extractors` 中每个字段的 pattern 列表（增删改 regex）
+- 不可控：不碰 canonical、alias、dict 映射等业务语义规则（这些只能人工维护）
+- 误伤保护：benchmark 必须全部通过才允许生效
+
+**阶段 3（远期，暂不排期）：声明式引擎替换生产管线**
+
+当 speaker-structurer 积累足够的匹配度（benchmark 通过率 ≥ 现有 `RuleStructuringService`）且后处理逻辑全部迁移后，才考虑切换为声明式主链路，`RuleStructuringService` 降级为回退路径。
+
+### 不建议：将 `structuring_*_v1` 纳入自我进化
+
+这四份资产由 Version Management（Admin UI）人工维护，**不纳入 Evolver 自动优化**，原因：
+
+1. **耦合太深**：每条 YAML pattern 命中后要走 `_build_order_item` / `_build_resume_item` 的复杂后处理，Evolver 对 YAML 的修改可能在代码侧静默出错
+2. **影响面大**：直接写入生产表，错误不可逆
+3. **领域知识壁垒**：canonical 别名（如「钟点工→小时工」）需要家政行业知识，DeepSeek 难以准确判断
+4. **反馈信号弱**：只能靠用户手动点「匹配不正确」，数量极少，Evolver 长期缺数据
+
+---
+
+**上游2：prompt结果判断**（匹配评分）。
+（三）匹配评分prompt的自我进化方案
+AI 按 prompt 对简历-订单匹配进行语义评分（0-22 分），结果在 H5 页面展示。用户点击「匹配不正确」（可选补充不正确的原因）后写入 wx_match_feedback 表。Evolver 读取用户负面反馈，经 DeepSeek 分析后优化 prompt.yaml（需人工确认，因 prompt 结果具有概率性），同时可优化 rules_config 中各维度的分值与权重。
 
 | | 上游1: 数据处理规则结果判断 | 上游2: prompt结果判断 |
 |---|---|---|
-| 适用范围 | Skill A / C | Skill B |
+| 适用范围 | 昵称选择（全部）+ 发言人结构化（仅 AI 验证旁车，阶段 1） | 匹配评分 |
 | 失败信号 | AI 纠正了规则输出 → JSONL | 用户点击「匹配不正确」 → wx_match_feedback |
 | 信号来源 | 机器（AI 自我检测） | 人类（H5 用户反馈） |
-| Evolver 优化 | rules_config.yaml | prompt.yaml + rules_config 维度分值 |
+| Evolver 优化 | rules_config.yaml（昵称选择全范围；发言人结构化仅 field_extractors 的 pattern） | prompt.yaml + rules_config 维度分值 |
 | 写入方式 | 自动 + benchmark 回滚 | 规则数值自动，prompt 人工确认 |
 
 
@@ -133,12 +377,12 @@
 
 已实现部分：
 
-- JSONL 写入 — Skill A/C（correction 角色）会写 `is_failure=true`
+- JSONL 写入 — 昵称选择 / 发言人结构化（correction 角色）会写 `is_failure=true`
 
 ```
 def _compute_is_failure(ai_role, rule_output, ai_validation, ai_reselection) -> bool:
     if ai_role == "enhancement":
-        return False  # ← Skill B 永远不写 is_failure
+        return False  # ← 匹配评分永远不写 is_failure
     if ai_role == "correction":
         if ai_validation and ai_validation.result == "不合理":
             return True
@@ -163,11 +407,12 @@ proposal.failure_count = len(failures)
 | 改动 | 说明 |
 |---|---|
 | `_apply_rules_changes` 升级 deep-merge | 当前只处理 int/float，需支持列表项增删（复用已有 `_deep_update`） |
-| Skill A benchmark() 填充真实案例 | 64 条真实案例（已有 `real_failure_cases.json`），跑完整规则引擎验证 |
-| Skill C benchmark() 填充真实案例 | M 条已标注原文，验证正则提取正确率 |
-| Skill A run.py 读 rules_config 声明式规则 | 薄执行层消费 rejection_rules 做过滤 |
-| Skill B run.py 每维度分值为 YAML 可配置 | full_score / penalty 从 rules_config 读取 |
+| 昵称选择 benchmark() 填充真实案例 | 64 条真实案例（已有 `real_failure_cases.json`），跑完整规则引擎验证 |
+| 发言人结构化 benchmark() 填充真实案例 | M 条已标注原文（从 speaker JSON 中手工标注），验证少量字段（age/hometown/job/salary）的正则提取 + AI 常识验证正确率 |
+| 昵称选择处理器读 rules_config 声明式规则 | 薄执行层消费 rejection_rules 做过滤 |
+| 匹配评分处理器每维度分值为 YAML 可配置 | full_score / penalty 从 rules_config 读取 |
 | `evolve.toml` mode `threshold_only` → `full` | 允许 Evolver 增删非数值规则 |
+| `evolve.toml` `scripts` 开关 | `scripts = true` 允许 Evolver 提出需要写代码的新规则（如新增参数），触发下方 4 层约束；`false`则仅限纯配置规则 。local环境默认开启，test/prod环境默认关闭|
 
 **二期：路径 2（prompt结果判断 → wx_match_feedback → Evolver）**
 
@@ -231,9 +476,9 @@ Evolver 当前只有一个 `evolve()` 方法，只读 JSONL，无 MySQL 依赖�
 | Evolver benchmark 框架 | ✅ 已实现 | 前/后对比 + 退化自动回滚 |
 | `_apply_rules_changes` deep-merge | ❌ 待改 | 当前仅处理 int/float |
 | 薄执行层 `rule_runner.py` | ❌ 待新建 | 通用规则遍历引擎 |
-| Skill A run.py 消费 rules_config | ❌ 当前不读 | 需对接声明式规则 |
-| Skill A rules_config.yaml | ❌ 当前无声明式规则 | 需补充 rejection_rules |
-| Skill A / C benchmark() | ❌ 当前空桩 | 需填充真实案例 |
+| 昵称选择处理器读 rules_config | ❌ 当前不读 | 需对接声明式规则 |
+| 昵称选择 rules_config.yaml | ❌ 当前无声明式规则 | 需补充 rejection_rules |
+| 昵称选择 / 发言人结构化 benchmark() | ❌ 当前空桩 | 需填充真实案例。发言人结构化仅覆盖少量字段的验证规则，不替代生产管线 |
 | `evolve.toml` mode | ❌ 当前 threshold_only | 需放开为 full |
 
 #### 3.4.3 执行步骤
@@ -242,11 +487,11 @@ Evolver 当前只有一个 `evolve()` 方法，只读 JSONL，无 MySQL 依赖�
 |---|---|---|---|---|---|
 | 1 | `_apply_rules_changes` 升级 | `evolver.py` | 用 `_deep_update` 替换正则数值替换，支持列表项增删、嵌套 dict 修改 | ~10 行 | — |
 | 2 | 新增 `rule_runner.py` | `skill_self_evolution/rule_runner.py` | 通用函数：遍历规则链，执行 regex/prefix/length 匹配 + drop/remove_prefix 动作 | ~30 行 | — |
-| 3 | Skill A run.py 对接规则 | `skill/nickname-selector/scripts/run.py` | `_rule_extract()` 增加：读 `config["rules_config"]["rejection_rules"]`，对每条 candidate 调 `rule_runner` 过滤 | ~20 行 | 2 |
-| 4 | Skill A rules_config 补充 | `skill/nickname-selector/rules_config.yaml` | 新增 `rejection_rules` 列表（正则/前缀/长度），覆盖现有 `system_prefix_drops` | 纯配置 | — |
-| 5 | Skill A benchmark 填充 | `skill/nickname-selector/scripts/run.py` | 读 `real_failure_cases.json`（64 条），调 `execute()` 跑完整链路，统计通过数 | ~30 行 | 3 |
-| 6 | Skill C benchmark 填充 | `skill/speaker-structurer/scripts/run.py` | 预置 M 条已标注原文 + 期望字段，验证提取正确率 | ~30 行 | — |
-| 7 | evolve.toml mode → full | Skill A / C 的 `evolve.toml` | `mode = "threshold_only"` → `"full"` | 1 行 | 1 |
+| 3 | 昵称选择处理器对接规则 | `skill/nickname-selector/scripts/run.py` | `_rule_extract()` 增加：读 `config["rules_config"]["rejection_rules"]`，对每条 candidate 调 `rule_runner` 过滤 | ~20 行 | 2 |
+| 4 | 昵称选择 rules_config 补充 | `backend/config/services/skill/nickname-selector/rules_config.yaml` | 新增 `rejection_rules` 列表（正则/前缀/长度），覆盖现有 `system_prefix_drops` | 纯配置 | — |
+| 5 | 昵称选择 benchmark 填充 | `backend/config/services/skill/nickname-selector/scripts/run.py` | 读 `real_failure_cases.json`（64 条），调 `execute()` 跑完整链路，统计通过数 | ~30 行 | 3 |
+| 6 | 发言人结构化 benchmark 填充 | `backend/config/services/skill/speaker-structurer/scripts/run.py` | 预置 M=20 条已标注原文 + 期望字段（age / hometown / job / salary），验证正则提取 + AI 常识验证正确率。**不替代生产管线，仅旁路质检** | ~30 行 | — |
+| 7 | evolve.toml mode → full | 昵称选择 的 `evolve.toml` | `mode = "threshold_only"` → `full`；新增配置说明 `scripts = true/false` 控制是否允许代码级新规则。**发言人结构化的 evolve.toml 暂不升级**（仅阶段 1 AI 验证旁车） | 1 行 | 1 |
 | 8 | 端到端集成测试 | 测试脚本 | 造 JSONL → 跑 Evolver → 验 YAML 变更 → 验 benchmark 通过/回滚 | ~40 行 | 1-7 |
 | 9 | 切回 pip 安装 | `pip install .` | 全量验证通过后，从 editable `-e` 切回 `pip install .`，确保生产环境使用固化的包副本 | 1 条命令 | 8 |
 
@@ -257,11 +502,11 @@ Evolver 当前只有一个 `evolve()` 方法，只读 JSONL，无 MySQL 依赖�
   │
 步骤2 (rule_runner.py)
   │
-  ├──→ 步骤3 (Skill A 对接) ──→ 步骤5 (Skill A benchmark)
+  ├──→ 步骤3 (昵称选择skill对接) ──→ 步骤5 (昵称选择 benchmark)
   │
-  ├──→ 步骤4 (Skill A YAML)
+  ├──→ 步骤4 (昵称选择 YAML)
   │
-  └──→ 步骤6 (Skill C benchmark)  ← 与 3/4/5 可并行
+  └──→ 步骤6 (发言人结构化 benchmark)  ← 与 3/4/5 可并行（仅旁路质检，不涉及生产管线切换）
            │
 步骤7 (evolve.toml)  ← 依赖 1
   │
@@ -280,10 +525,10 @@ Evolver 当前只有一个 `evolve()` 方法，只读 JSONL，无 MySQL 依赖�
 | V4 | rule_runner 正则过滤 | `run_rejection_rules("警惕不实营销信息", [{type: regex, pattern: "^警惕", action: drop}])` → `None` | 2 |
 | V5 | rule_runner 前缀去除 | `run_rejection_rules("姓名：张三", [{type: regex, pattern: "^姓名[：:]", action: remove_prefix}])` → `"张三"` | 2 |
 | V6 | rule_runner 链式执行 | 输入 `"姓名：@test"`，依次过 remove_prefix → prefix drop，最终 → `None` | 2 |
-| V7 | Skill A 规则引擎生效 | 64 条真实案例，拒绝规则生效后"安全横幅""简历碎片"类 nickname 不再作为 result | 3+4 |
-| V8 | Skill A 手动新规则提升通过数 | 对 64 条案例手动写入一条新拒绝规则（如过滤时间戳格式 `\d{4}年\d{1,2}月`），benchmark 通过数应上升 | 3+4+5 |
-| V9 | Skill A benchmark 返回值正确 | `benchmark(evolver)` 返回 `(pass_count, 64, [...failures])`，`pass_count > 0` 且 `total_count = 64` | 5 |
-| V10 | Skill C benchmark 返回值正确 | `benchmark(evolver)` 返回 `(pass_count, total, [...])`，`total_count > 0` | 6 |
+| V7 | 昵称选择规则引擎生效 | 64 条真实案例，拒绝规则生效后"安全横幅""简历碎片"类 nickname 不再作为 result | 3+4 |
+| V8 | 昵称选择手动新规则提升通过数 | 对 64 条案例手动写入一条新拒绝规则（如过滤时间戳格式 `\d{4}年\d{1,2}月`），benchmark 通过数应上升 | 3+4+5 |
+| V9 | 昵称选择 benchmark 返回值正确 | `benchmark(evolver)` 返回 `(pass_count, 64, [...failures])`，`pass_count > 0` 且 `total_count = 64` | 5 |
+| V10 | 发言人结构化 benchmark 返回值正确 | `benchmark(evolver)` 返回 `(pass_count, total, [...])`，`total_count ≥ 20`。仅覆盖 age/hometown/job/salary 四个字段的提取 + AI 常识验证 | 6 |
 | V11 | Evolver rules_changes deep-merge | Evolver 对 JSONL 分析后生成的 `rules_changes` 能正确 deep-merge 到 YAML（含列表项增删） | 1+8 |
 | V12 | Evolver 自动写入 | dry_run=False 时，rules_changes 成功写入 MySQL（rules_config.yaml 内容变更） | 1+8 |
 | V13 | Evolver 退化回滚 | 故意写入一条会导致 pass_after < pass_before 的坏规则 → 自动 rollback → proposal.rolled_back = True | 8 |
@@ -295,5 +540,83 @@ Evolver 当前只有一个 `evolve()` 方法，只读 JSONL，无 MySQL 依赖�
 | 风险 | 影响 | 缓解 |
 |---|---|---|
 | ruamel.yaml round-trip 在 `_deep_update` 合并后可能丢注释 | V3 失败 | 步骤 1 完成后单独验证 V3，若不通过则换用 ruamel 的 `CommentToken` API |
-| Skill A 的 `real_failure_cases.json` 依赖本地 session 目录存在 | V7/V8 因文件缺失无法跑 | `execute()` 增加文件不存在的容错（返回错误标记），benchmark 统计中计入 |
-| Skill C 没有现成标注数据 | V10 需从零造数据 | 从已有 speaker JSON 中手工标注 M=20 条优先 |
+| 昵称选择的 `real_failure_cases.json` 依赖本地 session 目录存在 | V7/V8 因文件缺失无法跑 | 处理器增加文件不存在的容错（返回错误标记），benchmark 统计中计入 |
+| 发言人结构化没有现成标注数据 | V10 需从零造数据 | 从已有 speaker JSON 中手工标注 M=20 条优先。覆盖面窄（仅 age/hometown/job/salary），不追求全字段覆盖 |
+
+#### 3.4.7 rules_config 运行时架构 — MySQL 为主源
+
+**问题**：Evolver 将优化后的 `rules_config` 写入 MySQL（通过 `ConfigVersionManager.save()`），但 `execute()` 只读磁盘 YAML。Evolver 改动无法实时生效。
+
+**方案**：MySQL 作主源（SSOT），磁盘 YAML 作初始种子和 git 可追踪副本。
+
+```
+┌─ 首次启动（种子阶段） ───────────────────────────────────────┐
+│ _seed_mysql_from_disk()                                      │
+│   disk YAML → ConfigVersionManager.save() → MySQL           │
+│   仅在 MySQL 中无该 Skill 配置时执行一次                        │
+└──────────────────────────────────────────────────────────────┘
+
+┌─ 运行时（每次 execute()） ────────────────────────────────────┐
+│ _load_rules_from_mysql()                                     │
+│   ConfigVersionManager.load() ← MySQL（实时取最新版本）        │
+│   优先级：MySQL → 种子写入 → 调用方传入（回退）                  │
+└──────────────────────────────────────────────────────────────┘
+
+┌─ Evolver 产出优化 ───────────────────────────────────────────┐
+│ 1. _version_mgr.save() → MySQL（版本号递增 + 历史归档）       │
+│ 2. _sync_rules_to_disk() → disk YAML（同步副本，git 可追踪）   │
+│ 3. benchmark 验证                                             │
+│    ├─ 通过 → 维持 MySQL + 磁盘                                │
+│    └─ 退化 → rollback MySQL → 读回旧配置 → _sync_rules_to_disk│
+└──────────────────────────────────────────────────────────────┘
+```
+
+**关键函数**：
+
+| 函数 | 位置 | 职责 |
+|---|---|---|
+| `_load_rules_from_mysql()` | 昵称选择处理器 | 每次执行从 MySQL 拉取最新 rules_config |
+| `_seed_mysql_from_disk()` | 昵称选择处理器 | 首次运行时将 disk YAML 写入 MySQL |
+| `_sync_rules_to_disk(yaml)` | `evolver.py::Evolver` | MySQL → 磁盘同步（写入后 + 回滚后） |
+
+**数据流方向**：
+
+- **读**：MySQL → `run.py::execute()`（每次调用都取最新版）
+- **写**：Evolver → MySQL（版本归档） → disk YAML（同步副本）
+- **回滚**：Evolver → MySQL rollback → 读回旧版 → disk YAML 同步
+
+**版本追踪**：MySQL `skill_config_history` 表自动归档每次变更，`skill_config.version` 递增。git 追踪 disk YAML 变更。
+
+#### 3.4.7.1 管线消费方的热加载
+
+上述 MySQL → `execute()` 链路解决了 **Skill 旁路** 的实时生效。但 **管线内 `nickname_ocr_simple.py`** 也需消费 `rules_config.yaml`（替代 `_classify()` 旧硬编码），该侧需同步考虑：
+
+**建议方案**（列入开发计划）：
+
+| 组件 | 当前状态 | 需要 |
+|---|---|---|
+| `nickname_ocr_simple.py` | 硬编码 `_classify()`，不读任何 YAML | 植入 `_load_rules_from_mysql()` 或读磁盘 YAML，支持热刷新 |
+| 扫描器 `SessionBatchScanner` | 每个 session 调一次 `_classify()` | 若 rules 变更频繁（Evolver 每天改），需进程内缓存 + TTL 失效，避免每次读 MySQL |
+
+可复用 `VersionManager` 的 `get_rule_structuring_runtime()` 缓存模式（snapshot key = 版本号，变更时自动刷新），与 `structuring_*_v1` 的热加载机制一致。
+
+#### 3.4.8 扩展执行步骤（correctness_criteria + evolve_prompt + MySQL 同步）
+
+| 序号 | 步骤 | 文件 | 改动说明 | 依赖 |
+|---|---|---|---|---|
+| 10 | rules_config 新增 correctness_criteria | `rules_config.yaml` | 结构化可执行判据：`bad_categories[]`（6 类 + patterns[]）+ `verification_conditions[]`（A→B→C 三条件） | 4 |
+| 11 | run.py 消费 correctness_criteria | `run.py` | `_judge_correctness()` 遍历 bad_categories 做正则匹配；benchmark 改用 criteria 判断 | 10 |
+| 12 | Skill 级 evolve_prompt.yaml | `evolve_prompt.yaml` | 领域知识注入：参考资料链接 + 正确性判据 + 已知坏类别 + 规则类型说明 | — |
+| 13 | 框架 evolve_prompt 解除限制 | `defaults/evolve_prompt.yaml` | 允许新增/修改/删除 correctness_criteria + rejection_rules（不限于数值） | — |
+| 14 | execute() MySQL 为主源 | `run.py` | `_load_rules_from_mysql()` + `_seed_mysql_from_disk()`，Evolver 改动实时生效 | 1 |
+| 15 | Evolver 写 MySQL 同步磁盘 | `evolver.py` | `_sync_rules_to_disk()` — 写入/回滚后同步 disk YAML | 1 |
+
+#### 3.4.9 扩展验收标准
+
+| 编号 | 验收项 | 通过标准 | 关联步骤 |
+|---|---|---|---|
+| V16 | correctness_criteria 可执行 | `_judge_correctness()` 对 10 条正/反例全部判断正确 | 10+11 |
+| V17 | Evolver 能产出改进建议 | 64 条 real_failure_cases 输入 → Evolver 产出≥1 条新 rejection_rule 或 bad_category | 12+13 |
+| V18 | MySQL 为主源实时生效 | Evolver dry_run=False 写入 MySQL → 下一次 execute() 读到新配置 | 14+15 |
+| V19 | 写 MySQL 同步磁盘 | Evolver 写入后 disk YAML 内容与 MySQL 一致 | 15 |
+| V20 | 磁盘种子可回读 | 清空 MySQL 该 Skill 配置 → execute() 首次调用从 disk YAML 自动恢复 | 14 |

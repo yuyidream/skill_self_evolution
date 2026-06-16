@@ -1,0 +1,73 @@
+{
+  "failure_count": 13,
+  "rules_changes": {
+    "correctness_criteria": {
+      "bad_categories": [
+        {
+          "name": "群名片模板",
+          "description": "姓名-职业/部门/机构/手机号等群名片格式",
+          "patterns": [
+            "^[\\u4e00-\\u9fa5]{2,4}[-—][\\u4e00-\\u9fa5]{2,}",
+            "^[\\u4e00-\\u9fa5]{2,4}[-—][\\u4e00-\\u9fa5]+\\d{6,}",
+            "^[\\u4e00-\\u9fa5]{2,4}[-—][\\u4e00-\\u9fa5]+部$",
+            "^[\\u4e00-\\u9fa5]{2,4}[-—][\\u4e00-\\u9fa5]+医院$",
+            "^[\\u4e00-\\u9fa5]{2,4}[-—][\\u4e00-\\u9fa5]+教育$"
+          ]
+        },
+        {
+          "name": "纯符号昵称",
+          "description": "纯emoji或特殊符号组合",
+          "patterns": [
+            "^[😊❤️🌟⭐✨★☆♡♥]+$",
+            "^[★☆♡♥]+[A-Za-z]*[★☆♡♥]+$"
+          ]
+        },
+        {
+          "name": "群名误判",
+          "description": "微信群聊名称被误识别为昵称",
+          "patterns": [
+            "^.*群[①②③④⑤⑥⑦⑧⑨⑩]?$",
+            "^.*群\\(\\d+\\)$",
+            "^.*交流群.*$",
+            "^.*接单群.*$"
+          ]
+        }
+      ]
+    },
+    "rejection_rules": [
+      {
+        "type": "regex",
+        "pattern": "^[\\u4e00-\\u9fa5]{2,4}[-—][\\u4e00-\\u9fa5]{2,}",
+        "action": "drop",
+        "description": "群名片模板：姓名-职业/部门/机构"
+      },
+      {
+        "type": "regex",
+        "pattern": "^[😊❤️🌟⭐✨★☆♡♥]+$",
+        "action": "drop",
+        "description": "纯emoji/特殊符号昵称"
+      },
+      {
+        "type": "regex",
+        "pattern": "^.*群[①②③④⑤⑥⑦⑧⑨⑩]?$",
+        "action": "drop",
+        "description": "群名误判：以'群'结尾，可能带圈号数字"
+      },
+      {
+        "type": "regex",
+        "pattern": "^.*群\\(\\d+\\)$",
+        "action": "drop",
+        "description": "群名误判：群名带人数后缀"
+      },
+      {
+        "type": "regex",
+        "pattern": "^[★☆♡♥]+[A-Za-z]*[★☆♡♥]+$",
+        "action": "drop",
+        "description": "纯符号+英文组合"
+      }
+    ],
+    "nickname_thresholds": {}
+  },
+  "prompt_changes": {},
+  "has_improvement": true
+}

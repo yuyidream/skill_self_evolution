@@ -1,16 +1,20 @@
 """
-EvoSkill 离线进化器 — 读 JSONL 日志 → DeepSeek 分析失败模式 → 生成优化提案 → 自动写入或发 PR。
+Evolver 离线进化器 — 读 JSONL 日志 → DeepSeek 分析失败模式 → 生成优化提案 → 自动写入或回滚。
 
-流程：
-1. 读昨日 JSONL → 筛选 is_failure=true
-2. 若 is_failure 样本 < min_failure_samples → 跳过本次进化
-3. 跑 benchmark()
-4. DeepSeek 分析失败模式（优先 Skill 自定义 evolve_prompt.yaml）
-5. 生成 YAML 优化提案
-6. 按 evolve.toml 权限 → 自动写 MySQL 或发 PR
-    - rules_config / prompt 权限为 true → 自动写入（含历史归档）
-    - skill_md / scripts 权限为 false → 生成 PR 文件
-7. benchmark 安全网：变更后重跑 benchmark，退化则自动回滚
+调用方注入 execute_fn / benchmark_fn / ai_role 等可覆盖项，
+框架只在 evolve() 中编排进化流程。
+
+使用方式：
+    evolver = Evolver(
+        skill_name="my-task",
+        execute_fn=my_execute,
+        benchmark_fn=my_benchmark,
+        ai_role="correction",
+        evolve_toml={"evolve": {"auto_modify": {"rules_config": {"mode": "full"}}}},
+        deepseek=DeepSeekClient(...),
+        version_mgr=ConfigVersionManager(...),
+    )
+    proposal = await evolver.evolve(dry_run=False)
 """
 
 import json
@@ -22,29 +26,27 @@ import time
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ruamel.yaml import YAML
 
 yaml_safe = YAML(typ='safe')
-yaml_rt = YAML()  # round-trip: 保留注释和格式
+yaml_rt = YAML()
 yaml_rt.default_flow_style = False
 
 
 def _yaml_dump_str(data: Any) -> str:
-    """ruamel.yaml YAML().dump() 需要 stream，薄封装返回字符串。"""
     buf = StringIO()
     yaml_rt.dump(data, buf)
     return buf.getvalue()
 
+
 from skill_self_evolution.deepseek import DeepSeekClient
-from skill_self_evolution.loader import SkillLoader, SkillModule
 from skill_self_evolution.logger import _get_log_dir
-from skill_self_evolution.models import EvolveProposalModel
+from skill_self_evolution.models import EvolveProposalModel, EvolvePromptYamlModel, EvolveTomlModel
 from skill_self_evolution.yaml_lint import lint_and_fix_yaml
 
 _BEIJING_TZ = timezone(timedelta(hours=8))
-
 _FRAMEWORK_DEFAULTS = Path(__file__).resolve().parents[2] / "defaults"
 
 
@@ -52,8 +54,20 @@ def _yesterday_str() -> str:
     return (datetime.now(_BEIJING_TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
+# ── 默认函数 ──
+
+def _default_execute(skill_input, config: dict):
+    raise NotImplementedError("Evolver needs execute_fn")
+
+
+def _default_benchmark(executor) -> tuple[int, int, list]:
+    return 0, 0, []
+
+
+# ── EvolveProposal ──
+
 class EvolveProposal:
-    """一次进化分析产生的提案（内部状态用普通类，序列化时通过 EvolveProposalModel 校验）。"""
+    """一次进化分析产生的提案。"""
 
     def __init__(self):
         self.rules_changes: dict[str, Any] = {}
@@ -68,7 +82,6 @@ class EvolveProposal:
         self.rolled_back: bool = False
 
     def to_model(self) -> EvolveProposalModel:
-        """转为 Pydantic 模型（用于序列化/日志）。"""
         return EvolveProposalModel(
             rules_changes=self.rules_changes,
             prompt_changes=self.prompt_changes,
@@ -81,43 +94,68 @@ class EvolveProposal:
         )
 
 
+# ── Evolver ──
+
 class Evolver:
-    """离线进化引擎。"""
+    """离线进化引擎 — 调用方注入所有业务函数，框架编排进化流程。"""
 
     def __init__(
         self,
-        skill_name: str,
-        skill_base_dir: Path | None = None,
+        *,
+        skill_name: str = "default",
+        execute_fn: Callable | None = None,
+        benchmark_fn: Callable[..., tuple[int, int, list]] | None = None,
+        ai_role: str = "correction",
+        evolve_toml: dict[str, Any] | None = None,
+        evolve_prompt_yaml: dict[str, Any] | None = None,
+        log_dir: Path | None = None,
+        rules_config_disk_path: Path | None = None,
         deepseek: DeepSeekClient | None = None,
-        config_version_manager=None,
+        version_mgr=None,
     ):
         """
         Args:
-            skill_name: Skill 名称
-            skill_base_dir: Skill 根目录
-            deepseek: DeepSeek 客户端（用于分析失败模式）
-            config_version_manager: ConfigVersionManager 实例（用于写入 MySQL）
+            skill_name: 日志/标识名
+            execute_fn: 规则执行函数
+            benchmark_fn: 基准测试函数  (evolver) -> (pass, total, failures)
+            ai_role: "correction" | "enhancement"
+            evolve_toml: evolve.toml 解析后的 dict（含 auto_modify / guard）
+            evolve_prompt_yaml: AI 分析用的提示词模板 dict
+            log_dir: JSONL 日志目录（默认从 skill_name 推导）
+            rules_config_disk_path: rules_config.yaml 磁盘路径（用于同步）
+            deepseek: DeepSeek 客户端
+            version_mgr: ConfigVersionManager（MySQL 读写）
         """
         self.skill_name = skill_name
-        self._loader = SkillLoader(skill_base_dir)
+        self.execute_fn = execute_fn or _default_execute
+        self.benchmark_fn = benchmark_fn or _default_benchmark
+        self.ai_role = ai_role
+
+        # ── Pydantic 入口校验 ──
+        if evolve_toml is not None:
+            EvolveTomlModel.model_validate(evolve_toml)
+        if evolve_prompt_yaml is not None:
+            EvolvePromptYamlModel.model_validate(evolve_prompt_yaml)
+
+        self.evolve_toml = evolve_toml or {}
+        self.evolve_prompt_yaml = evolve_prompt_yaml or {}
+        self._log_dir = log_dir
+        self._rules_disk_path = rules_config_disk_path
         self._deepseek = deepseek
-        self._version_mgr = config_version_manager
+        self._version_mgr = version_mgr
+
+    @property
+    def log_dir(self) -> Path:
+        if self._log_dir:
+            return self._log_dir
+        return _get_log_dir(self.skill_name)
 
     def _load_failure_logs(self, date_str: str | None = None) -> list[dict]:
-        """读取 JSONL 日志中 is_failure=true 的记录。
-
-        Args:
-            date_str: 日期字符串 YYYY-MM-DD，默认昨天
-
-        Returns:
-            is_failure=true 的日志记录列表
-        """
         target_date = date_str or _yesterday_str()
-        log_dir = _get_log_dir(self.skill_name)
-        log_path = log_dir / f"{target_date}.jsonl"
+        log_path = self.log_dir / f"{target_date}.jsonl"
 
         if not log_path.exists():
-            logger.info("EvoSkill [%s] 日志文件不存在: %s", self.skill_name, log_path)
+            logger.info("Evolver [%s] 日志文件不存在: %s", self.skill_name, log_path)
             return []
 
         failures = []
@@ -134,42 +172,30 @@ class Evolver:
                     except json.JSONDecodeError:
                         continue
         except Exception as e:
-            logger.warning("EvoSkill [%s] 日志读取失败: %s", self.skill_name, e)
+            logger.warning("Evolver [%s] 日志读取失败: %s", self.skill_name, e)
             return []
 
-        logger.info("EvoSkill [%s] 读取 %d 条 is_failure 记录", self.skill_name, len(failures))
+        logger.info("Evolver [%s] 读取 %d 条 is_failure 记录", self.skill_name, len(failures))
         return failures
 
-    def _run_benchmark(self, skill: SkillModule) -> tuple[int, int, list]:
-        """跑 benchmark() 获取基准指标。
-
-        Returns:
-            (pass_count, total_count, failures_list)
-        """
+    def _run_benchmark(self) -> tuple[int, int, list]:
         try:
-            return skill.benchmark(self)
+            return self.benchmark_fn(self)
         except Exception as e:
-            logger.warning("EvoSkill [%s] benchmark 执行失败: %s", self.skill_name, e)
+            logger.warning("Evolver [%s] benchmark 执行失败: %s", self.skill_name, e)
             return 0, 0, [str(e)]
 
     async def _analyze_failures(
         self,
-        skill: SkillModule,
         failures: list[dict],
         current_rules: str,
         current_prompt: str,
     ) -> dict:
-        """调用 DeepSeek 分析失败模式。
-
-        Returns:
-            {"rules_changes": {...}, "prompt_changes": {...}}
-        """
         if not self._deepseek:
-            logger.warning("EvoSkill [%s] DeepSeek 客户端未配置，无法分析", self.skill_name)
+            logger.warning("Evolver [%s] DeepSeek 客户端未配置，无法分析", self.skill_name)
             return {}
 
-        # 加载 evolve_prompt.yaml（Skill 自定义优先，框架默认降级）
-        prompt_cfg = skill.evolve_prompt_yaml or {}
+        prompt_cfg = self.evolve_prompt_yaml or {}
         if not prompt_cfg:
             defaults_path = _FRAMEWORK_DEFAULTS / "evolve_prompt.yaml"
             if defaults_path.exists():
@@ -181,9 +207,8 @@ class Evolver:
             "分析以下失败案例：\n{{failure_logs}}\n输出优化建议 JSON。",
         )
 
-        # 序列化失败日志（截断过长内容）
         failure_texts = []
-        for f in failures[:20]:  # 最多 20 条
+        for f in failures[:20]:
             line = json.dumps({
                 "input_summary": f.get("input_summary", {}),
                 "rule_output": f.get("rule_output", {}),
@@ -211,7 +236,7 @@ class Evolver:
             )
             return response
         except Exception as e:
-            logger.warning("EvoSkill [%s] 分析请求失败: %s", self.skill_name, e)
+            logger.warning("Evolver [%s] 分析请求失败: %s", self.skill_name, e)
             return {}
 
     async def evolve(
@@ -223,134 +248,109 @@ class Evolver:
         """执行一轮进化。
 
         Args:
-            min_failure_samples: 最少失败样本数，不足则跳过
+            min_failure_samples: 最少失败样本数
             dry_run: True=仅分析不写入，False=自动写入 MySQL
             date_str: 日期字符串，默认昨天
-
-        Returns:
-            EvolveProposal 或 None（跳过时）
         """
         logger.info(
-            "EvoSkill [%s] 开始进化分析 (min_failure_samples=%d, dry_run=%s)",
-            self.skill_name,
-            min_failure_samples,
-            dry_run,
+            "Evolver [%s] 开始进化分析 (min_failure_samples=%d, dry_run=%s)",
+            self.skill_name, min_failure_samples, dry_run,
         )
 
         proposal = EvolveProposal()
 
-        # 1. 加载 Skill 模块
-        try:
-            skill = self._loader.load(self.skill_name)
-        except Exception as e:
-            logger.error("EvoSkill [%s] 加载失败: %s", self.skill_name, e)
+        # 1. enhancement 角色不触发进化
+        if self.ai_role == "enhancement":
+            logger.info("Evolver [%s] ai_role=enhancement，不触发进化", self.skill_name)
             return None
 
-        # 2. enhancement 角色不触发进化
-        if skill.ai_role == "enhancement":
-            logger.info("EvoSkill [%s] ai_role=enhancement，不触发进化", self.skill_name)
-            return None
-
-        # 3. 读取 JSONL 日志
+        # 2. 读 JSONL
         failures = self._load_failure_logs(date_str)
         proposal.failure_count = len(failures)
 
         if len(failures) < min_failure_samples:
             logger.info(
-                "EvoSkill [%s] 失败样本不足 (got=%d, need=%d)，跳过进化",
-                self.skill_name,
-                len(failures),
-                min_failure_samples,
+                "Evolver [%s] 失败样本不足 (got=%d, need=%d)，跳过进化",
+                self.skill_name, len(failures), min_failure_samples,
             )
             return proposal
 
-        # 4. 跑 benchmark（进化前基线）
-        logger.info("EvoSkill [%s] 运行进化前 benchmark...", self.skill_name)
-        proposal.benchmark_before = self._run_benchmark(skill)
+        # 3. 进化前 benchmark
+        logger.info("Evolver [%s] 运行进化前 benchmark...", self.skill_name)
+        proposal.benchmark_before = self._run_benchmark()
         logger.info(
-            "EvoSkill [%s] 进化前 benchmark: %d/%d 通过",
-            self.skill_name,
-            proposal.benchmark_before[0],
-            proposal.benchmark_before[1],
+            "Evolver [%s] 进化前 benchmark: %d/%d 通过",
+            self.skill_name, proposal.benchmark_before[0], proposal.benchmark_before[1],
         )
 
-        # 5. 加载当前配置
+        # 4. 加载当前配置
         current_rules = ""
         current_prompt = ""
         if self._version_mgr:
             current_rules = self._version_mgr.load_raw(self.skill_name, "rules_config") or ""
             current_prompt = self._version_mgr.load_raw(self.skill_name, "prompt") or ""
 
-        # 6. DeepSeek 分析
-        analysis = await self._analyze_failures(skill, failures, current_rules, current_prompt)
+        # 5. DeepSeek 分析
+        analysis = await self._analyze_failures(failures, current_rules, current_prompt)
         if not analysis:
-            logger.warning("EvoSkill [%s] DeepSeek 分析未产出结果", self.skill_name)
+            logger.warning("Evolver [%s] DeepSeek 分析未产出结果", self.skill_name)
             return proposal
 
         proposal.rules_changes = analysis.get("rules_changes", {})
         proposal.prompt_changes = analysis.get("prompt_changes", {})
 
         if not proposal.rules_changes and not proposal.prompt_changes:
-            logger.info("EvoSkill [%s] DeepSeek 未提出任何优化建议", self.skill_name)
+            logger.info("Evolver [%s] DeepSeek 未提出任何优化建议", self.skill_name)
             return proposal
 
-        # 7. 生成 YAML 文本
-        evolve_cfg = skill.evolve_toml
-        auto_cfg = evolve_cfg.get("evolve", {}).get("auto_modify", {})
+        # 6. 生成 YAML 文本
+        auto_cfg = self.evolve_toml.get("evolve", {}).get("auto_modify", {})
 
         if proposal.rules_changes and auto_cfg.get("rules_config", False):
             rules_threshold = auto_cfg.get("rules_config", {})
-            max_pct = rules_threshold.get("max_change_percent", 20)
+            max_pct = rules_threshold.get("max_change_percent", 20) if isinstance(rules_threshold, dict) else 20
             proposal.rules_text = self._apply_rules_changes(current_rules, proposal.rules_changes, max_pct)
 
         if proposal.prompt_changes and auto_cfg.get("prompt", False):
             proposal.prompt_text = self._apply_prompt_changes(current_prompt, proposal.prompt_changes)
 
-        # 8. 写入
+        # 7. 写入
         if not dry_run and self._version_mgr:
-            guard = evolve_cfg.get("evolve", {}).get("guard", {})
+            guard = self.evolve_toml.get("evolve", {}).get("guard", {})
             require_bench = guard.get("require_benchmark_pass", True)
 
             applied = True
             if proposal.rules_text and auto_cfg.get("rules_config", False):
                 proposal.rules_text, lint_errors = lint_and_fix_yaml(proposal.rules_text)
                 if lint_errors:
-                    logger.warning("EvoSkill [%s] rules_config lint issues: %s", self.skill_name, lint_errors)
+                    logger.warning("Evolver [%s] rules_config lint issues: %s", self.skill_name, lint_errors)
                 self._version_mgr.save(self.skill_name, "rules_config", proposal.rules_text)
                 self._sync_rules_to_disk(proposal.rules_text)
-                logger.info("EvoSkill [%s] rules_config 已写入 MySQL + 同步到磁盘", self.skill_name)
+                logger.info("Evolver [%s] rules_config 已写入 MySQL + 同步到磁盘", self.skill_name)
             if proposal.prompt_text and auto_cfg.get("prompt", False):
                 proposal.prompt_text, lint_errors = lint_and_fix_yaml(proposal.prompt_text)
                 if lint_errors:
-                    logger.warning("EvoSkill [%s] prompt lint issues: %s", self.skill_name, lint_errors)
+                    logger.warning("Evolver [%s] prompt lint issues: %s", self.skill_name, lint_errors)
                 self._version_mgr.save(self.skill_name, "prompt", proposal.prompt_text)
-                logger.info("EvoSkill [%s] prompt 已写入 MySQL", self.skill_name)
+                logger.info("Evolver [%s] prompt 已写入 MySQL", self.skill_name)
 
-            # 9. benchmark 安全网：重新跑 benchmark 验证不退化
+            # 8. benchmark 安全网
             if require_bench and (proposal.rules_text or proposal.prompt_text):
-                logger.info("EvoSkill [%s] 运行进化后 benchmark...", self.skill_name)
-                # 清除缓存使新配置生效
-                self._loader.invalidate_cache(self.skill_name)
-                skill_after = self._loader.load(self.skill_name)
-                proposal.benchmark_after = self._run_benchmark(skill_after)
+                logger.info("Evolver [%s] 运行进化后 benchmark...", self.skill_name)
+                proposal.benchmark_after = self._run_benchmark()
 
                 pass_before = proposal.benchmark_before[0]
                 total_before = proposal.benchmark_before[1]
                 pass_after = proposal.benchmark_after[0]
 
                 if total_before > 0 and pass_after < pass_before:
-                    # 退化 → 回滚
                     logger.warning(
-                        "EvoSkill [%s] benchmark 退化 (%d/%d → %d/%d)，自动回滚",
-                        self.skill_name,
-                        pass_before,
-                        total_before,
-                        pass_after,
-                        proposal.benchmark_after[1],
+                        "Evolver [%s] benchmark 退化 (%d/%d → %d/%d)，自动回滚",
+                        self.skill_name, pass_before, total_before,
+                        pass_after, proposal.benchmark_after[1],
                     )
                     if proposal.rules_text and auto_cfg.get("rules_config", False):
                         self._version_mgr.rollback(self.skill_name, "rules_config", 0)
-                        # 回滚后从 MySQL 读回旧配置并同步到磁盘
                         restored = self._version_mgr.load_raw(self.skill_name, "rules_config")
                         if restored:
                             self._sync_rules_to_disk(restored)
@@ -366,44 +366,32 @@ class Evolver:
         return proposal
 
     def _sync_rules_to_disk(self, yaml_content: str) -> None:
-        """MySQL → 磁盘同步：将 rules_config 内容写回到 Skill 目录的 rules_config.yaml。"""
-        disk_path = self._loader._base_dir / self.skill_name / "rules_config.yaml"
+        if not self._rules_disk_path:
+            logger.info("Evolver [%s] 未配置 rules_config_disk_path，跳过磁盘同步", self.skill_name)
+            return
+        disk_path = Path(self._rules_disk_path)
         try:
             disk_path.parent.mkdir(parents=True, exist_ok=True)
             disk_path.write_text(yaml_content, encoding="utf-8")
-            logger.info("EvoSkill [%s] rules_config 已同步到磁盘: %s", self.skill_name, disk_path)
+            logger.info("Evolver [%s] rules_config 已同步到磁盘: %s", self.skill_name, disk_path)
         except Exception as e:
-            logger.warning("EvoSkill [%s] 磁盘同步失败: %s", self.skill_name, e)
+            logger.warning("Evolver [%s] 磁盘同步失败: %s", self.skill_name, e)
 
     def _apply_rules_changes(self, current_yaml: str, changes: dict, max_change_percent: float) -> str:
-        """将 DeepSeek 产出的 rules_changes 合并到现有 YAML。
-
-        使用 YAML deep-merge（同 _apply_prompt_changes），支持列表项增删、嵌套 dict 修改。
-        对数值变更做 max_change_percent 校验并告警。
-        """
         if not current_yaml:
             return _yaml_dump_str(changes)
-
         try:
             cfg = yaml_rt.load(current_yaml) or {}
-
-            # 数值变更校验：超过 max_change_percent 仅告警，不阻断
             _warn_numeric_drift(cfg, changes, max_change_percent)
-
             _deep_update(cfg, changes)
             return _yaml_dump_str(cfg)
         except Exception:
-            logger.warning("EvoSkill [%s] rules_config YAML 合并失败，回退原始 YAML", self.skill_name)
+            logger.warning("Evolver [%s] rules_config YAML 合并失败，回退原始 YAML", self.skill_name)
             return current_yaml
 
     def _apply_prompt_changes(self, current_yaml: str, changes: dict) -> str:
-        """将 DeepSeek 产出的 prompt_changes 合并到现有 YAML。
-
-        当前实现：按字段路径替换 YAML 值。
-        """
         if not current_yaml:
             return _yaml_dump_str(changes)
-
         try:
             cfg = yaml_rt.load(current_yaml) or {}
             _deep_update(cfg, changes)
@@ -412,26 +400,26 @@ class Evolver:
             return current_yaml
 
 
+# ── 工具函数 ──
+
 def _warn_numeric_drift(original: dict, changes: dict, max_pct: float) -> None:
-    """对 changes 中数值字段做漂移校验，超过 max_pct 仅告警。"""
     for key, value in changes.items():
         if isinstance(value, dict):
             _warn_numeric_drift(original.get(key, {}), value, max_pct)
         elif isinstance(value, list):
-            pass  # 列表项增删不做百分比校验
+            pass
         elif isinstance(value, (int, float)):
             orig_val = original.get(key)
             if isinstance(orig_val, (int, float)) and orig_val != 0:
                 drift = abs(value - orig_val) / abs(orig_val) * 100
                 if drift > max_pct:
                     logger.warning(
-                        "EvoSkill rules_config 数值变更超限: %s %s → %s (%.1f%%, 阈值 %.0f%%)",
+                        "Evolver rules_config 数值变更超限: %s %s → %s (%.1f%%, 阈值 %.0f%%)",
                         key, orig_val, value, drift, max_pct,
                     )
 
 
 def _deep_update(base: dict, updates: dict) -> None:
-    """递归合并 dict。"""
     for key, value in updates.items():
         if isinstance(value, dict) and isinstance(base.get(key), dict):
             _deep_update(base[key], value)

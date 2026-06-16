@@ -1,0 +1,27 @@
+{
+  "failure_count": 40,
+  "rules_changes": {
+    "correctness_criteria": {
+      "bad_categories": [],
+      "verification_conditions": [
+        {
+          "id": "card_binding",
+          "description": "条件一（卡片绑定）：user_click_area_scaling 与 resume_thumb_bboxes_scaling 有空间交集，且交集面积占卡片面积比例不低于30%，当两张卡面积差小于5%时标记为不确定",
+          "min_overlap_area_ratio": 0.3,
+          "ambiguity_tie_ratio": 0.05
+        },
+        {
+          "id": "click_coordinate",
+          "description": "条件三（点击坐标）：click_x/y 差值 X≤15px、Y≤2px",
+          "max_x_px": 15,
+          "max_y_px": 2
+        }
+      ]
+    },
+    "rejection_rules": [],
+    "nickname_thresholds": {}
+  },
+  "has_improvement": true,
+  "applied": true,
+  "rolled_back": false
+}

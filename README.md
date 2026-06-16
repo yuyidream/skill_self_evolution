@@ -1,14 +1,18 @@
-# skill_self_evolution v0.2.0
+# skill_self_evolution v0.3.0
 
-Skill 自进化框架：**Pydantic 全链路校验** + 规则执行 + AI 常识判断 + 离线进化的可插拔 Skill 执行引擎。
+Skill 自进化框架：**Pydantic 全链路校验** + 规则执行 + AI 常识判断 + 离线进化 + **AI 生成代码质量门禁**的可插拔 Skill 执行引擎。
+
+## v0.3.0 更新
+
+- **CodeGuard**：基于 Python AST 的 6 条内置代码检查规则（裸 except / 圈复杂度 / global / 日志在循环 / 吞异常 / 非确定性导入）
+- **FunctionContext**：AST 自动提取函数上下文（is_method / 可用变量 / 禁止变量），替代人工硬编码变量清单
+- **GatePipeline**：4 层代码门禁管道 — 静态检查 → 单元测试 → 集成测试 → 生产候选数据回放
+- 每层失败 → 错误信息喂回 AI → AI 重写 → 重新过门禁（最多 3 轮）
 
 ## v0.2.0 更新
 
 - **Pydantic 全链路覆盖**：12 个源文件，8 个完整 Pydantic 校验（4 个有理据豁免）
 - 新增 11 个 Pydantic 模型，覆盖 AI 中间结果、DeepSeek 响应、JSONL 日志、降级配置、进化提案、Skill 子结构
-- `AiValidationResult` / `AiReselectionResult` 用 `Literal["合理","不合理"]` 替代裸 `dict.get("result")`
-- `DeepSeekChatResponse` 替代 dataclass，字段缺失自动默认值
-- `ConfigVersionManager` 兼容 `dict` 和 `DbConfig` 双路径
 
 ## 架构
 
@@ -20,48 +24,77 @@ Skill 自进化框架：**Pydantic 全链路校验** + 规则执行 + AI 常识�
                                                  Result ✅          Result ✅            ✅
 ```
 
-## Pydantic 模型清单
+### Evolver 生成新代码时的 4 层门禁
 
-### 核心框架
+```
+AI 生成代码 → Layer 1 静态检查 → Layer 2 单元测试 → Layer 3 集成测试 → Layer 4 生产回放
+       ↑              ↓                ↓                 ↓                ↓
+       └────────── 失败反馈 ───────────┴─────────────────┴────────────────┘
+```
 
-| 模型 | 作用 | 校验内容 |
-|---|---|---|
-| `SkillInput[T]` | 入口 | `trace_id` + `input_data`（泛型） |
-| `SkillOutput` | 出口 | `source` + `result` + `ai_validated` + `ai_reselected` |
-
-### AI 中间结果（v0.2.0 新增）
-
-| 模型 | 作用 | 校验约束 |
-|---|---|---|
-| `AiValidationResult` | AI 验证输出 | `Literal["合理","不合理"]` + reason ≤500字 |
-| `AiReselectionResult` | AI 重选输出 | `result: str` + reason ≤500字 |
-
-### 数据层（v0.2.0 新增）
-
-| 模型 | 作用 |
-|---|---|
-| `DeepSeekChatResponse` | HTTP 响应结构校验 |
-| `LogEntry` | JSONL 日志条目（11 字段全默认值容错） |
-| `FallbackConfigModel` | 降级参数（gt/ge/le 约束） |
-| `EvolveProposalModel` | 进化提案序列化 |
-| `NicknameSkillResult` | nickname-selector 子结构示例 |
-| `DeepSeekEnvConfig` | API 连接配置 |
-| `DbConfig` | 数据库连接配置（port ge=1 le=65535） |
-
-## 快速开始
+## CodeGuard 快速使用
 
 ```python
-from skill_self_evolution import SkillExecutor
+from skill_self_evolution import CodeGuard
 
-executor = SkillExecutor(
-    deepseek_api_key="sk-xxx",  # 或设置 DEEPSEEK_API_KEY
-    skill_base_dir="/path/to/skills",
+guard = CodeGuard(max_complexity=10)
+passed, issues = guard.gate("path/to/code.py")
+
+for i in issues:
+    print(f"[{i.level}] {i.rule}: {i.message} @ {i.file}:{i.line}")
+```
+
+### AST 上下文自动提取
+
+```python
+from skill_self_evolution import extract_context
+
+ctx = extract_context("path/to/code.py", "my_function")
+print(ctx.is_method)     # False
+print(ctx.local_vars)    # ['cx', 'cy', 'result', ...]
+print(ctx.context_for_prompt())  # AI 可注入 prompt
+```
+
+### 6 条内置规则
+
+| 规则 | 说明 | 级别 |
+|---|---|---|
+| `no_bare_except` | 禁止裸 `except:` | error |
+| `cyclomatic_complexity` | 圈复杂度 ≤ 10 | error |
+| `no_global_modification` | 禁止模块级函数用 `global` | error |
+| `no_logging_in_loop` | 禁止 for/while 内调用 logging | warning |
+| `no_exception_swallowing` | 禁止 `except: pass` / 空 handler | error |
+| `no_nondeterministic` | 禁止 `import random` / `time.time` / `datetime.now` | error |
+
+### 自定义 Checker
+
+```python
+from skill_self_evolution.code_guard import BaseChecker, CodeGuard
+
+class NoPrintInProd(BaseChecker):
+    def visit_Call(self, node):
+        if isinstance(node.func, ast.Name) and node.func.id == "print":
+            self._add("no_print", "warning", "print() in production", node)
+
+guard = CodeGuard()
+guard.register("no_print", NoPrintInProd)
+```
+
+## GatePipeline 快速使用
+
+```python
+from skill_self_evolution import GatePipeline
+
+pipeline = GatePipeline(max_complexity=10)
+
+result = await pipeline.run(
+    filepaths=["backend/skill_service/run.py"],
+    unit_test_path="tests/test_skill.py",
+    e2e_test_path="tests/test_e2e.py",
+    candidate_replay_fn=my_replay_function,
+    backend_dir=".",
 )
-result = await executor.run("nickname-selector", {
-    "screenshot_id": "scr_004",
-    "metadata_path": "/path/to/metadata.json",
-    "debug_session_derived_path": "/path/to/debug_session_derived.json",
-})
+print(f"Passed: {result.passed}, Layers: {len(result.layers)}")
 ```
 
 ## 安装
@@ -78,6 +111,12 @@ pip install -e .
 
 # 运行测试
 pytest
+
+# 只跑 CodeGuard 测试
+pytest tests/test_code_guard.py -v
+
+# 只跑 GatePipeline 测试
+pytest tests/test_gate_pipeline.py -v
 ```
 
 ## 环境变量

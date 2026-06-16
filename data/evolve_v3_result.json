@@ -1,0 +1,20 @@
+{
+  "failure_count": 52,
+  "rules_changes": {
+    "correctness_criteria": {
+      "bad_categories": [],
+      "verification_conditions": [
+        {
+          "id": "click_coordinate",
+          "description": "条件三（点击坐标）：click_x/y 差值 X≤15px、Y≤2px",
+          "max_x_px": 15,
+          "max_y_px": 2
+        }
+      ]
+    },
+    "rejection_rules": [],
+    "nickname_thresholds": {}
+  },
+  "prompt_changes": {},
+  "has_improvement": true
+}
