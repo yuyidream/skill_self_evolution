@@ -1,4 +1,4 @@
-﻿import sys,os,subprocess as sp
+import sys,os,subprocess as sp
 os.environ['DB_PASSWORD']='local_root_123'
 import sys
 sys.path.insert(0, r'E:/projects/housekeeping_ai_match/backend/scripts/wx_match')
