@@ -77,6 +77,8 @@ class EvolveProposal:
         self.prompt_text: str | None = None
         self.analysis_raw: str = ""
         self.failure_count: int = 0
+        self.training_set_size: int = 0
+        self.validation_set_size: int = 0
         self.benchmark_before: tuple[int, int, list] = (0, 0, [])
         self.benchmark_after: tuple[int, int, list] = (0, 0, [])
         self.applied: bool = False
@@ -90,6 +92,8 @@ class EvolveProposal:
             prompt_text=self.prompt_text,
             analysis_raw=self.analysis_raw,
             failure_count=self.failure_count,
+            training_set_size=self.training_set_size,
+            validation_set_size=self.validation_set_size,
             applied=self.applied,
             rolled_back=self.rolled_back,
         )
@@ -185,12 +189,73 @@ class Evolver:
         logger.info("Evolver [%s] 读取 %d 条 is_failure 记录", self.skill_name, len(failures))
         return failures
 
+    def _build_training_set(self, exclude_date: str | None = None) -> tuple[list[dict], int]:
+        """构建训练集：历史所有 is_failure=true，排除 exclude_date。
+
+        PRD §B.1：训练集 = 历史失败 - 当天新增失败（防循环自证）。
+
+        Returns:
+            (training_entries, excluded_count): 训练样本列表 + 当天排除数
+        """
+        target_date = exclude_date or _yesterday_str()
+        all_failures: list[dict] = []
+        excluded = 0
+        scanned = 0
+
+        if not self.log_dir.exists():
+            logger.info("Evolver [%s] log_dir 不存在: %s，训练集为空", self.skill_name, self.log_dir)
+            return [], 0
+
+        for jsonl_file in sorted(self.log_dir.glob("*.jsonl")):
+            try:
+                basename = jsonl_file.name
+                # 文件名格式: YYYY-MM-DD.jsonl
+                if not basename.endswith(".jsonl"):
+                    continue
+                date_part = basename[:-6]  # strip ".jsonl"
+
+                with open(jsonl_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                            if not entry.get("is_failure", False):
+                                continue
+                            scanned += 1
+                            if date_part == target_date:
+                                excluded += 1
+                            else:
+                                all_failures.append(entry)
+                        except json.JSONDecodeError:
+                            continue
+            except Exception as e:
+                logger.warning("Evolver [%s] 训练集读取失败 %s: %s", self.skill_name, jsonl_file, e)
+
+        logger.info(
+            "Evolver [%s] 训练集构建完成: total_scanned=%d, training=%d, excluded_today=%d",
+            self.skill_name, scanned, len(all_failures), excluded,
+        )
+        return all_failures, excluded
+
     def _run_benchmark(self) -> tuple[int, int, list]:
         try:
             return self.benchmark_fn(self)
         except Exception as e:
             logger.warning("Evolver [%s] benchmark 执行失败: %s", self.skill_name, e)
             return 0, 0, [str(e)]
+
+    def _get_golden_set_size(self) -> int:
+        """查询 Golden set 大小（nickname_golden_label 表）。"""
+        try:
+            if self._version_mgr and hasattr(self._version_mgr, "_cursor"):
+                self._version_mgr._cursor.execute("SELECT COUNT(*) FROM nickname_golden_label")
+                row = self._version_mgr._cursor.fetchone()
+                return int(row[0]) if row else 0
+        except Exception:
+            pass
+        return 0
 
     async def _analyze_failures(
         self,
@@ -280,16 +345,26 @@ class Evolver:
             logger.info("Evolver [%s] ai_role=enhancement，不触发进化", self.skill_name)
             return None
 
-        # 2. 读 JSONL
-        failures = self._load_failure_logs(date_str)
-        proposal.failure_count = len(failures)
+        # 2. 读当天 JSONL（仅用于阈值判断）
+        today_failures = self._load_failure_logs(date_str)
+        proposal.failure_count = len(today_failures)
 
-        if len(failures) < min_failure_samples:
+        if len(today_failures) < min_failure_samples:
             logger.info(
                 "Evolver [%s] 失败样本不足 (got=%d, need=%d)，跳过进化",
-                self.skill_name, len(failures), min_failure_samples,
+                self.skill_name, len(today_failures), min_failure_samples,
             )
             return proposal
+
+        # 2.5 构建训练集（历史失败 - 当天）和验证集（Golden set）
+        training_set, excluded_today = self._build_training_set(date_str)
+        validation_size = self._get_golden_set_size() if self._version_mgr else 0
+        logger.info(
+            "Evolver [%s] 训练集=%d 条, 验证集(Golden set)=%d 条, 当天排除=%d 条",
+            self.skill_name, len(training_set), validation_size, excluded_today,
+        )
+        proposal.training_set_size = len(training_set)
+        proposal.validation_set_size = validation_size
 
         # ── 进化轮次号 ──
         evolution_round = 1
@@ -300,11 +375,11 @@ class Evolver:
                 logger.debug("Evolver [%s] 反馈表创建跳过: %s", self.skill_name, e)
             evolution_round = self._version_mgr.get_next_evolution_round(self.skill_name)
 
-        # 3. 进化前 benchmark
-        logger.info("Evolver [%s] 运行进化前 benchmark...", self.skill_name)
+        # 3. 进化前 benchmark（验证集：Golden set）
+        logger.info("Evolver [%s] 运行进化前 benchmark (验证集)...", self.skill_name)
         proposal.benchmark_before = self._run_benchmark()
         logger.info(
-            "Evolver [%s] 进化前 benchmark: %d/%d 通过",
+            "Evolver [%s] 进化前 benchmark (验证集): %d/%d 通过",
             self.skill_name, proposal.benchmark_before[0], proposal.benchmark_before[1],
         )
 
@@ -323,8 +398,8 @@ class Evolver:
             if mode in ("both", "prompt_only"):
                 current_prompt = self._version_mgr.load_raw(self.skill_name, "prompt") or ""
 
-        # 5. DeepSeek 分析
-        analysis = await self._analyze_failures(failures, current_rules, current_prompt)
+        # 5. DeepSeek 分析（使用训练集）
+        analysis = await self._analyze_failures(training_set if training_set else today_failures, current_rules, current_prompt)
         if not analysis:
             logger.warning("Evolver [%s] DeepSeek 分析未产出结果", self.skill_name)
             return proposal
@@ -488,13 +563,20 @@ class Evolver:
 
     def _build_proposal_summary(self, proposal: EvolveProposal) -> str:
         """从提案中提取摘要文本，供反馈记录。"""
-        parts = []
+        parts: list[str] = []
         if proposal.rules_changes:
             keys = list(proposal.rules_changes.keys())
             parts.append(f"rules_changes: {', '.join(keys)}")
         if proposal.prompt_changes:
             keys = list(proposal.prompt_changes.keys())
             parts.append(f"prompt_changes: {', '.join(keys)}")
+        if proposal.training_set_size or proposal.validation_set_size:
+            parts.append(
+                json.dumps({
+                    "training_set_size": proposal.training_set_size,
+                    "validation_set_size": proposal.validation_set_size,
+                }, ensure_ascii=False)
+            )
         return "; ".join(parts) if parts else ""
 
 

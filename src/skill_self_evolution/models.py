@@ -118,6 +118,8 @@ class EvolveProposalModel(BaseModel):
     prompt_text: str | None = Field(default=None)
     analysis_raw: str = Field(default="")
     failure_count: int = Field(default=0)
+    training_set_size: int = Field(default=0)
+    validation_set_size: int = Field(default=0)
     applied: bool = Field(default=False)
     rolled_back: bool = Field(default=False)
 
