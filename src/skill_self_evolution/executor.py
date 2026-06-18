@@ -161,7 +161,7 @@ class SkillExecutor:
                             injected_count=len(self._enrichment),
                         )
                     except Exception as e:
-                        logger.warning("Executor [%s] enrich_failure 回调异常: %s", self.skill_name, e)
+                        logger.warning("executor.enrich_failure_error", skill_name=self.skill_name, error=str(e))
             else:
                 candidates = self._load_candidates(candidates_path)
                 data_source = candidates_path
@@ -181,7 +181,7 @@ class SkillExecutor:
                 result=str(rule_result.get("result", ""))[:80],
             )
         except Exception as e:
-            logger.exception("Executor [%s] 规则阶段异常", self.skill_name)
+            logger.exception("executor.rule_stage_error", skill_name=self.skill_name)
             elapsed = (time.monotonic() - start_time) * 1000
             output = SkillOutput(
                 source="rule",
@@ -216,7 +216,7 @@ class SkillExecutor:
                     reason=(ai_validation.reason if ai_validation else "")[:120],
                 )
             except Exception as e:
-                logger.warning("Executor [%s] AI 验证异常: %s", self.skill_name, e)
+                logger.warning("executor.ai_validation_error", skill_name=self.skill_name, error=str(e))
                 fb_result = fallback.on_validate_failure(e)
                 warnings.extend(fb_result.warnings)
                 if fb_result.skip_ai:
@@ -265,7 +265,7 @@ class SkillExecutor:
                         rule_output.warnings = warnings
                         rule_output.warnings.append("AI 重选后仍不合理")
                 except Exception as e:
-                    logger.warning("Executor [%s] AI 重选异常: %s", self.skill_name, e)
+                    logger.warning("executor.ai_reselection_error", skill_name=self.skill_name, error=str(e))
                     fb_result2 = fallback.on_reselect_failure(e)
                     warnings.extend(fb_result2.warnings)
 
@@ -300,14 +300,14 @@ class SkillExecutor:
                 self._log(effective_trace_id, False, False, data_source, rule_output, None, None, final_output, warnings, elapsed)
                 return final_output
             except Exception as e:
-                logger.warning("Executor [%s] AI 增强异常: %s", self.skill_name, e)
+                logger.warning("executor.ai_enhancement_error", skill_name=self.skill_name, error=str(e))
                 rule_output.warnings = warnings
                 elapsed = (time.monotonic() - start_time) * 1000
                 self._log(effective_trace_id, False, False, data_source, rule_output, None, None, rule_output, warnings, elapsed)
                 return rule_output
 
         else:
-            logger.warning("Executor [%s] 未知 ai_role=%s，纯规则输出", self.skill_name, self.ai_role)
+            logger.warning("executor.unknown_ai_role", skill_name=self.skill_name, ai_role=self.ai_role)
             rule_output.warnings = warnings
             elapsed = (time.monotonic() - start_time) * 1000
             self._log(effective_trace_id, False, False, data_source, rule_output, None, None, rule_output, warnings, elapsed)
@@ -581,4 +581,4 @@ class SkillExecutor:
                 enrich_keys=list(self._enrichment.keys()) if self._enrichment else [],
             )
         except Exception as e:
-            logger.warning("Executor 日志记录失败: %s", e)
+            logger.warning("executor.jsonl_log_error", error=str(e))

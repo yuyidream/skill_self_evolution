@@ -54,7 +54,7 @@ class SkillLogger:
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except OSError as e:
-            logger.warning("Skill 日志写入失败: {}", e)
+            logger.warning("Skill 日志写入失败: %s", e)
 
     def log_execution(
         self,
