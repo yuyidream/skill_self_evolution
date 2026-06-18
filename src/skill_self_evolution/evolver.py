@@ -163,8 +163,22 @@ class Evolver:
 
     def _load_failure_logs(self, date_str: str | None = None) -> list[dict]:
         target_date = date_str or _yesterday_str()
-        log_path = self.log_dir / f"{target_date}.jsonl"
 
+        # 优先 MySQL
+        if self._version_mgr:
+            try:
+                self._version_mgr.ensure_execution_log_table()
+                failures = self._version_mgr.load_failure_logs(self.skill_name, target_date)
+                logger.info(
+                    "Evolver [%s] 从 MySQL 读取 %d 条 is_failure 记录 (date=%s)",
+                    self.skill_name, len(failures), target_date,
+                )
+                return failures
+            except Exception as e:
+                logger.warning("Evolver [%s] MySQL 读取失败，回退 JSONL: %s", self.skill_name, e)
+
+        # 回退 JSONL
+        log_path = self.log_dir / f"{target_date}.jsonl"
         if not log_path.exists():
             logger.info("Evolver [%s] 日志文件不存在: %s", self.skill_name, log_path)
             return []
@@ -186,7 +200,7 @@ class Evolver:
             logger.warning("Evolver [%s] 日志读取失败: %s", self.skill_name, e)
             return []
 
-        logger.info("Evolver [%s] 读取 %d 条 is_failure 记录", self.skill_name, len(failures))
+        logger.info("Evolver [%s] 从 JSONL 读取 %d 条 is_failure 记录", self.skill_name, len(failures))
         return failures
 
     def _build_training_set(self, exclude_date: str | None = None) -> tuple[list[dict], int]:
@@ -198,6 +212,23 @@ class Evolver:
             (training_entries, excluded_count): 训练样本列表 + 当天排除数
         """
         target_date = exclude_date or _yesterday_str()
+
+        # 优先 MySQL
+        if self._version_mgr:
+            try:
+                self._version_mgr.ensure_execution_log_table()
+                training, excluded = self._version_mgr.load_training_set(
+                    self.skill_name, target_date
+                )
+                logger.info(
+                    "Evolver [%s] 训练集构建完成 (MySQL): training=%d, excluded_today=%d",
+                    self.skill_name, len(training), excluded,
+                )
+                return training, excluded
+            except Exception as e:
+                logger.warning("Evolver [%s] MySQL 训练集读取失败，回退 JSONL: %s", self.skill_name, e)
+
+        # 回退 JSONL
         all_failures: list[dict] = []
         excluded = 0
         scanned = 0
@@ -209,10 +240,9 @@ class Evolver:
         for jsonl_file in sorted(self.log_dir.glob("*.jsonl")):
             try:
                 basename = jsonl_file.name
-                # 文件名格式: YYYY-MM-DD.jsonl
                 if not basename.endswith(".jsonl"):
                     continue
-                date_part = basename[:-6]  # strip ".jsonl"
+                date_part = basename[:-6]
 
                 with open(jsonl_file, "r", encoding="utf-8") as f:
                     for line in f:
@@ -234,7 +264,7 @@ class Evolver:
                 logger.warning("Evolver [%s] 训练集读取失败 %s: %s", self.skill_name, jsonl_file, e)
 
         logger.info(
-            "Evolver [%s] 训练集构建完成: total_scanned=%d, training=%d, excluded_today=%d",
+            "Evolver [%s] 训练集构建完成 (JSONL): total_scanned=%d, training=%d, excluded_today=%d",
             self.skill_name, scanned, len(all_failures), excluded,
         )
         return all_failures, excluded

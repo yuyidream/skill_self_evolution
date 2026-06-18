@@ -13,6 +13,7 @@ from skill_self_evolution.logging import get_logger
 
 logger = get_logger(__name__)
 from datetime import datetime, timezone, timedelta
+import json as _json
 
 _BEIJING_TZ = timezone(timedelta(hours=8))
 
@@ -124,6 +125,174 @@ class ConfigVersionManager:
                 """
             )
         logger.info("skill_evolution_feedback 表确认存在")
+
+    def ensure_execution_log_table(self) -> None:
+        """创建 skill_execution_log 表（幂等）。"""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS skill_execution_log (
+                    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    skill_name      VARCHAR(64) NOT NULL,
+                    trace_id        VARCHAR(128) NOT NULL DEFAULT '',
+                    timestamp       VARCHAR(32) NOT NULL COMMENT 'ISO-8601 北京时间',
+                    is_failure      TINYINT(1) NOT NULL DEFAULT 0,
+                    no_valid_alternative TINYINT(1) NOT NULL DEFAULT 0,
+                    input_summary   LONGTEXT COMMENT '含 session 文件全文（enrich_failure 注入）',
+                    rule_output     JSON,
+                    ai_validation   JSON,
+                    ai_reselection  JSON,
+                    final_output    JSON,
+                    warnings        JSON,
+                    elapsed_ms      DOUBLE NOT NULL DEFAULT 0,
+                    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_skill_date (skill_name, timestamp),
+                    INDEX idx_skill_failure (skill_name, is_failure)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """
+            )
+        logger.info("skill_execution_log 表确认存在")
+
+    def save_execution_log(self, entry: dict) -> int:
+        """写入一条执行日志到 MySQL。
+
+        Returns:
+            新插入的 id
+        """
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO skill_execution_log
+                   (skill_name, trace_id, timestamp, is_failure, no_valid_alternative,
+                    input_summary, rule_output, ai_validation, ai_reselection,
+                    final_output, warnings, elapsed_ms)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (
+                    entry.get("skill_name", ""),
+                    entry.get("trace_id", ""),
+                    entry.get("timestamp", ""),
+                    1 if entry.get("is_failure") else 0,
+                    1 if entry.get("no_valid_alternative") else 0,
+                    _json.dumps(entry.get("input_summary", {}), ensure_ascii=False),
+                    _json.dumps(entry.get("rule_output", {}), ensure_ascii=False),
+                    _json.dumps(entry.get("ai_validation"), ensure_ascii=False) if entry.get("ai_validation") else None,
+                    _json.dumps(entry.get("ai_reselection"), ensure_ascii=False) if entry.get("ai_reselection") else None,
+                    _json.dumps(entry.get("final_output", {}), ensure_ascii=False),
+                    _json.dumps(entry.get("warnings", []), ensure_ascii=False),
+                    entry.get("elapsed_ms", 0),
+                ),
+            )
+            log_id = cur.lastrowid
+        return log_id
+
+    def load_failure_logs(self, skill_name: str, date_str: str) -> list[dict]:
+        """加载指定日期的失败日志。
+
+        Returns:
+            日志条目列表（dict 格式，字段名与原 JSONL 一致）
+        """
+        import pymysql.cursors
+        conn = self._get_conn()
+        with conn.cursor(pymysql.cursors.DictCursor) as cur:
+            cur.execute(
+                """SELECT * FROM skill_execution_log
+                   WHERE skill_name = %s AND is_failure = 1 AND timestamp LIKE %s
+                   ORDER BY id""",
+                (skill_name, f"{date_str}%"),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "trace_id": r.get("trace_id", ""),
+                "skill_name": r.get("skill_name", ""),
+                "timestamp": r.get("timestamp", ""),
+                "is_failure": bool(r.get("is_failure")),
+                "no_valid_alternative": bool(r.get("no_valid_alternative")),
+                "input_summary": self._parse_json_field(r.get("input_summary")),
+                "rule_output": self._parse_json_field(r.get("rule_output")),
+                "ai_validation": self._parse_json_field(r.get("ai_validation")),
+                "ai_reselection": self._parse_json_field(r.get("ai_reselection")),
+                "final_output": self._parse_json_field(r.get("final_output")),
+                "warnings": self._parse_json_field(r.get("warnings")) or [],
+                "elapsed_ms": r.get("elapsed_ms", 0),
+            }
+            for r in rows
+        ]
+
+    def load_training_set(
+        self, skill_name: str, exclude_date: str
+    ) -> tuple[list[dict], int]:
+        """加载训练集：历史所有 is_failure=1，排除 exclude_date。
+
+        Returns:
+            (training_entries, excluded_today_count)
+        """
+        import pymysql.cursors
+        conn = self._get_conn()
+        with conn.cursor(pymysql.cursors.DictCursor) as cur:
+            # 先查总数
+            cur.execute(
+                "SELECT COUNT(*) as cnt FROM skill_execution_log "
+                "WHERE skill_name = %s AND is_failure = 1",
+                (skill_name,),
+            )
+            total = cur.fetchone()["cnt"]
+
+            # 训练集：历史失败 - 当天
+            cur.execute(
+                "SELECT * FROM skill_execution_log "
+                "WHERE skill_name = %s AND is_failure = 1 "
+                "AND timestamp NOT LIKE %s "
+                "ORDER BY id",
+                (skill_name, f"{exclude_date}%"),
+            )
+            training_rows = cur.fetchall()
+
+            # 当天排除数
+            cur.execute(
+                "SELECT COUNT(*) as cnt FROM skill_execution_log "
+                "WHERE skill_name = %s AND is_failure = 1 AND timestamp LIKE %s",
+                (skill_name, f"{exclude_date}%"),
+            )
+            excluded = cur.fetchone()["cnt"]
+
+        training = [
+            {
+                "trace_id": r.get("trace_id", ""),
+                "skill_name": r.get("skill_name", ""),
+                "timestamp": r.get("timestamp", ""),
+                "is_failure": True,
+                "no_valid_alternative": bool(r.get("no_valid_alternative")),
+                "input_summary": self._parse_json_field(r.get("input_summary")),
+                "rule_output": self._parse_json_field(r.get("rule_output")),
+                "ai_validation": self._parse_json_field(r.get("ai_validation")),
+                "ai_reselection": self._parse_json_field(r.get("ai_reselection")),
+                "final_output": self._parse_json_field(r.get("final_output")),
+                "warnings": self._parse_json_field(r.get("warnings")) or [],
+                "elapsed_ms": r.get("elapsed_ms", 0),
+            }
+            for r in training_rows
+        ]
+
+        logger.info(
+            "ConfigVersionManager 训练集加载: skill=%s total_failures=%d training=%d excluded_today=%d",
+            skill_name, total, len(training), excluded,
+        )
+        return training, excluded
+
+    def _parse_json_field(self, value) -> Any:
+        """解析 JSON 字段（MySQL JSON 列可能返回 str 或已解析对象）。"""
+        if value is None:
+            return None
+        if isinstance(value, (dict, list)):
+            return value
+        if isinstance(value, str):
+            try:
+                return _json.loads(value)
+            except Exception:
+                return value
+        return value
 
     def save_feedback(
         self,

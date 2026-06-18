@@ -1,14 +1,16 @@
 """
-JSONL 日志器 — 使用 structlog 结构化日志 + Pydantic 校验。
+JSONL 日志器 + MySQL 执行日志 — Pydantic 校验。
 
 日志路径: /data/skill-logs/{skill_name}/{date}.jsonl
-（可通过 SKILL_LOG_DIR 环境变量覆盖）
+MySQL 表: skill_execution_log（主存储）
+（JSONL 为辅，MySQL 表为主）
 """
 
 import json
 import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from typing import Any
 
 from skill_self_evolution.logging import get_logger
 
@@ -34,11 +36,16 @@ def _get_log_dir(skill_name: str) -> Path:
 
 
 class SkillLogger:
-    """Skill 执行日志器，每行一个 JSON（Pydantic LogEntry 校验）。"""
+    """Skill 执行日志器。
 
-    def __init__(self, skill_name: str):
+    - 主存储：MySQL skill_execution_log 表（需传入 version_mgr）
+    - 副存储：JSONL 文件（容器内本地备份）
+    """
+
+    def __init__(self, skill_name: str, version_mgr: Any = None):
         self.skill_name = skill_name
         self._log_path: Path | None = None
+        self._version_mgr = version_mgr
 
     @property
     def log_path(self) -> Path:
@@ -49,7 +56,22 @@ class SkillLogger:
         return self._log_path
 
     def write(self, entry: dict) -> None:
-        """追加一行 JSON 到日志文件（接受已校验的 dict）。"""
+        """追加一行 JSON 到日志文件 + MySQL。"""
+        # 1. MySQL 主存储
+        if self._version_mgr:
+            try:
+                self._version_mgr.ensure_execution_log_table()
+                log_id = self._version_mgr.save_execution_log(entry)
+                logger.debug(
+                    "execution_log.mysql_written",
+                    skill_name=self.skill_name,
+                    log_id=log_id,
+                    is_failure=entry.get("is_failure"),
+                )
+            except Exception:
+                logger.warning("execution_log.mysql_write_failed", exc_info=True)
+
+        # 2. JSONL 副存储
         try:
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -69,7 +91,7 @@ class SkillLogger:
         warnings: list[str],
         elapsed_ms: float,
     ) -> None:
-        """写入标准执行日志条目（Pydantic 校验后持久化）。"""
+        """写入标准执行日志条目（Pydantic 校验后持久化到 MySQL + JSONL）。"""
         entry = LogEntry(
             trace_id=trace_id,
             skill_name=self.skill_name,

@@ -60,17 +60,20 @@ class SkillExecutor:
         deepseek_api_base: str = "https://api.deepseek.com/v1",
         deepseek_model: str = "deepseek-v4-flash",
         enrich_failure: "Callable[[str], dict[str, str]] | None" = None,
+        version_mgr: "Any | None" = None,
     ):
         """
         Args:
             enrich_failure: 可选回调，入参 session_dir 路径，返回 dict[str, str]。
                            返回的键值对会注入到 JSONL 的 input_summary 中，
                            供 Evolver 分析时传递 session 文件内容给 LLM。
+            version_mgr: ConfigVersionManager 实例（可选），传入后执行日志会同时写入 MySQL。
         """
         self.skill_name = skill_name
         self.ai_role = ai_role
         self._enrich_failure = enrich_failure
         self._enrichment: dict[str, str] = {}
+        self._version_mgr = version_mgr
 
         self._deepseek = DeepSeekClient(
             api_key=deepseek_api_key,
@@ -554,7 +557,7 @@ class SkillExecutor:
         elapsed_ms: float,
     ) -> None:
         try:
-            log_writer = SkillLogger(self.skill_name)
+            log_writer = SkillLogger(self.skill_name, version_mgr=self._version_mgr)
             input_summary: dict[str, Any] = {"candidates_path": candidates_source}
             if self._enrichment:
                 input_summary.update(self._enrichment)
