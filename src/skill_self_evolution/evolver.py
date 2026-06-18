@@ -146,7 +146,7 @@ class Evolver:
 
         self.evolve_toml = evolve_toml or {}
         self.evolve_prompt_yaml = evolve_prompt_yaml or {}
-        self._log_dir = log_dir
+        self._log_dir = Path(log_dir) if log_dir else None
         self._rules_disk_path = rules_config_disk_path
         self._deepseek = deepseek
         self._version_mgr = version_mgr

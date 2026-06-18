@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "skill_self_evolution"
-version = "0.3.4"
+version = "0.3.5"
 description = "Skill 自进化框架：Pydantic 全链路校验 + 规则执行 + AI 常识判断 + 离线进化 + AI 生成代码质量门禁的 Skill 执行引擎"
 requires-python = ">=3.11"
 dependencies = [
