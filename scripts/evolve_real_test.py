@@ -336,9 +336,9 @@ def make_l2_cases():
         "click_coordinate_passed": False,
     }
 
-    # ── 10 条案例：基于当前 YAML 阈值 (max_x_px=15, max_y_px=2) 模拟 ──
-    # 场景 A: X 方向 — 点击偏离超过当前 15px 阈值
-    # 场景 B: Y 方向 — 矮卡片点击距底 > 2px（真实 rg_009: 卡片高90px, 点击距底17px）
+    # ── 10 条案例：基于当前 YAML 阈值 (max_x_px=20, max_y_px=0) 模拟 ──
+    # 场景 A: X 方向 — 点击偏离超过当前 20px 阈值
+    # 场景 B: Y 方向 — 矮卡片点击距底 > 0px（真实 rg_009: 卡片高90px, 点击距底17px）
     cases_data = []
     idx = 1
 

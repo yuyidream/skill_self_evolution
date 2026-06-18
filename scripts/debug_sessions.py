@@ -16,7 +16,7 @@ for sn, sid in pairs:
         with open(dp, encoding='utf-8') as f:
             debug = json.load(f)
         print(f'\n{sn}: type={type(debug).__name__}')
-        
+
         if isinstance(debug, list):
             screenshots = debug
         elif isinstance(debug, dict):

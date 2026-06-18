@@ -17,6 +17,7 @@
 | V 0.1  |          | 新建     |            |          |      |
 | V 0.2  | 2026-06-16 | 阶段1+2实施：框架 geometry 规则支持、executor session_dir、EvolveGuardModel 补齐、管线 rules_config 补全、run.py session_dir、扫描旁路 JSONL hook、**nickname_ocr_simple 声明式桥接（主路径替换）**、进化 APScheduler 凌晨2点 | AI | AI | 测试通过 |
 | V 0.3  | 2026-06-16 | `_classify()` 声明式替换：`_classify_with_declarative_rules()` 作为主分类路径，config (NicknameOcrConfig) 阈值优先于 YAML，`_starts_with_system_prefix` 返回 bubble_text（非 drop），geometry_rules 修复 `type: geometry` 字段，YAML path `parents[3]` 修正 | AI | AI | 34/34 nickname OCR + 149/149 skill_self_evolution 全绿 |
+| V 0.4  | 2026-06-18 | `SkillExecutor` 新增 `enrich_failure` 回调机制：扫描旁路通过回调将 `debug_session_derived.json`、`speaker JSON`、`customer_metadata.json` 三个文件全文注入 JSONL 的 `input_summary`，供 Evolver LLM 分析几何原因；`evolve_prompt.yaml` 同步更新领域知识摘要与数据注入说明 | AI | AI | 测试通过 |
 
 ---
 
@@ -150,6 +151,38 @@ build/wx_match_sessions/wechat/{device_id}/{YYYYMMDD}/session_{session_id}/
 - local 环境：数据在本地 `build/wx_match_sessions/` 下，宿主机和 Docker 容器通过 bind mount 共享。
 - test/prod 环境：数据在华为云 OBS（bucket `wx-screenshot` / `test-sync-obs`），路径前缀 `wechat/`。下载到本地后目录结构与 local 一致。Evolver 运行时通过 `wx_session_processed.obs_prefix` 定位 OBS key，再从 OBS 拉取到本地。
 
+##### enrich_failure 回调：session 文件注入
+
+Evolver 分析失败案例时需要查阅 `debug_session_derived.json`（OCR 分类结果，含 block 坐标/分类/confidence/band）、`speaker JSON`（管线最终选中的昵称及正文）、以及 `customer_metadata.json`（简历卡片 bbox、点击坐标等几何上下文）。若只给 Evolver 一个 `session_dir` 路径，则 LLM 无法直接访问这些文件。
+
+**方案**：在 `SkillExecutor` 构造函数中引入 `enrich_failure` 可选回调（`Callable[[str], dict[str, str]]`），由调用方实现。扫描旁路传入 `_enrich_nickname_failure(session_dir)`，该函数读三个文件的全文内容，返回 `dict[str, str]`。`SkillExecutor._log()` 将回调返回的键值对合并到 JSONL 的 `input_summary` 中，与 `candidates_path` 一并写入。
+
+**数据流**：
+
+```
+scan sidecar
+  ↓ 调用 SkillExecutor(enrich_failure=_enrich_nickname_failure)
+    ↓ SkillExecutor.run(session_dir=...)
+      ↓ 触发 self._enrich_failure(session_dir)
+        → 读 debug_session_derived.json 全文
+        → 读 speaker JSON 全文
+        → 读 customer_metadata.json 全文（可选）
+      ↓ 存入 self._enrichment
+    ↓ SkillExecutor._log() 将 self._enrichment 合并到 input_summary
+      → JSONL 条目中包含完整的 session 文件内容
+```
+
+**JSONL 注入字段**（`input_summary` 内新增的键）：
+
+| 键 | 来源文件 | 内容 | condition |
+|----|----------|------|-----------|
+| `candidates_path` | — | session_dir 路径（始终存在） | always |
+| `debug_session_derived_json` | `debug_session_derived.json` | 全文 JSON 字符串，含 `blocks[].text/class/band/bbox_xyxy/confidence/speaker_bands[]` | 文件存在 |
+| `speaker_json` | `{昵称}_{时间戳}.json` | 全文 JSON 字符串，含 `speaker_binding_raw`、`body_raw_merged`、`source_files[]` | 文件存在 |
+| `customer_metadata_json` | `customer_metadata.json` | 全文 JSON 字符串，含 `resume_thumb_bboxes`、`click_context` | 文件存在 |
+
+**异常处理**：回调异常时仅记录 warning 日志，不阻塞扫描管线。单个文件读取失败不影响其他文件的注入。
+
 ### 自我进化旁路（通过local/test/prod env参数来实现开关）
 
 上述管线内的规则执行与降级始终运行于管线中，与自我进化开关无关。
@@ -176,6 +209,12 @@ env文件里的 `enable_nickname_evolution` 参数作为开关，只控制管线
 以上两种均写 JSONL 日志标记 `is_failure=true`（日志带 `session_dir` 字段，指向 session 目录）。
 若合理，标记 `is_failure=false`。
 
+4. `SkillExecutor` 调用方通过 `enrich_failure` 回调注入 session 文件内容：
+   回调在 `SkillExecutor.run(session_dir=...)` 执行时被调用，读取 `debug_session_derived.json`、
+   `speaker JSON`、`customer_metadata.json` 的全文，注入到 JSONL 的 `input_summary` 中。
+   这些数据供后续 Evolver LLM 分析几何原因（如 band 归属错误、卡片边界偏差等），
+   而非让"昵称选择结果判断AI"使用。
+
 
 #### Evolver训练集和验证集
 由 Evolver 在每晚进化定时任务里构建
@@ -198,6 +237,7 @@ env文件里的 `enable_nickname_evolution` 参数作为开关，只控制管线
 | `resume_thumb_bboxes` | ❌ 不需要 | ✅ 需要，分析卡片绑定规则 |
 | `click_context` | ❌ 不需要 | ✅ 需要，验证点击精度 |
 | 截图图片 | ❌ DeepSeek 纯文本模型 | ❌ 同上，当前无法利用 |
+| **数据获取方式** | SkillExecutor 直接读取候选池文本列表 + speaker JSON | 通过 `enrich_failure` 回调全文注入到 JSONL `input_summary` 中，LLM 无需文件系统访问 |
 
 
 #### 每晚进化定时任务 `nickname_evolution`
@@ -207,9 +247,17 @@ env文件里的 `enable_nickname_evolution` 参数作为开关，只控制管线
 
 Evolver 先构建训练集和验证集，
 然后读取 JSONL 失败案例，失败案例数量达到阈值后（默认≥10，可配置），让 “Evolver 规则进化AI”（当前接入DeepSeek），根据 `evolve_prompt.yaml` 的提示词，分析当前 `rules_config.yaml` 哪里导致误判，然后优化已有规则或提出新规则。
-`evolve_prompt.yaml` 的输入包括：当前 `rules_config.yaml` + 失败案例的 `debug_session_derived.json`（通过 JSONL 中的 `session_dir` 定位）+ 可选 `customer_metadata.json`（提供 bbox、click_context 等几何上下文）。
+`evolve_prompt.yaml` 的输入包括：
+- 当前 `rules_config.yaml`
+- 失败案例的 JSONL 条目（含 `rule_output` / `ai_validation` / `ai_reselection` 等字段）
+- `input_summary` 中由 `enrich_failure` 回调注入的 session 文件全文：
+  - `debug_session_derived_json`：OCR 分类结果（blocks、speaker_bands 等）
+  - `speaker_json`：管线选中昵称、正文、来源截图
+  - `customer_metadata_json`（可选）：简历卡片 bbox、点击坐标等几何上下文
 
-数据定位链路：JSONL 中的 `session_dir` → 本地路径直接读取；若为 OBS 路径，通过 `session_id` 查 `wx_session_processed.obs_prefix` 从 OBS 下载。
+**数据定位**：Evolver 无需再从 `session_dir` 做文件系统或 OBS 读取 ——
+所有 session 文件内容已在扫描旁路阶段由 `enrich_failure` 回调一次性注入到 JSONL 中，
+LLM 直接解析 `input_summary` 内的 JSON 字符串即可获得完整的几何与文本上下文。
 
 Evolver 提出的规则分两类，由 `evolve.toml` 的 `[evolve.auto_modify]` 节控制（Evolver 通过 benchmark 确定性对比决定自动接受或回滚）：
 
@@ -269,6 +317,7 @@ CREATE TABLE IF NOT EXISTS nickname_golden_label (
 - `label_type='correction'`：纠错案例，`golden_nickname` 为正确答案，用于驱动 Evolver 修复规则。
 
 benchmark 读取逻辑：查询 `nickname_golden_label WHERE session_id=? AND speaker_json_file=?`，有记录则取 `golden_nickname`，无记录则 fallback 到 speaker JSON 的 `speaker_binding_raw`。
+
 
 
 （二）发言人结构化规则的自我进化方案
@@ -340,6 +389,9 @@ speaker-structurer 不替代生产管线，而是作为**旁路质检**：
 
 ---
 
+
+
+
 **上游2：prompt结果判断**（匹配评分）。
 （三）匹配评分prompt的自我进化方案
 AI 按 prompt 对简历-订单匹配进行语义评分（0-22 分），结果在 H5 页面展示。用户点击「匹配不正确」（可选补充不正确的原因）后写入 wx_match_feedback 表。Evolver 读取用户负面反馈，经 DeepSeek 分析后优化 prompt.yaml（需人工确认，因 prompt 结果具有概率性），同时可优化 rules_config 中各维度的分值与权重。
@@ -377,6 +429,94 @@ AI 按 prompt 对简历-订单匹配进行语义评分（0-22 分），结果在
 ### 3.3 可用性需求
 
 系统稳定，99.9%的时间可访问
+
+### 3.4 结构化日志（structlog）
+
+整个进化链路使用 `structlog`（stdlib 集成）输出结构化日志。默认使用 `ConsoleRenderer`（开发环境彩色输出），设置 `STRUCTLOG_JSON=true` 环境变量可切换为 `JSONRenderer`（生产环境 / Docker）。
+
+日志配置入口：`src/skill_self_evolution/logging.py`（`get_logger(__name__)` 返回已配置的 `structlog.BoundLogger`）。
+
+#### 3.4.1 日志事件表
+
+##### SkillExecutor（`executor.py`）
+
+| 事件 | 级别 | 触发时机 | 关键字段 |
+|------|------|---------|---------|
+| `executor.start` | INFO | `run()` 入口 | `skill_name`, `ai_role`, `source`（`session_dir` / `candidates_path`), `trace_id` |
+| `executor.config_validation_failed` | ERROR | Pydantic 校验 rules_config/prompt_config 失败 | `skill_name`, `error` |
+| `executor.enrich_failure_ok` | INFO | `enrich_failure` 回调成功返回 | `session_dir`, `injected_keys`, `injected_count` |
+| `executor.rule_stage_ok` | INFO | 规则阶段正常完成 | `candidates_count`, `filtered_count`, `result` |
+| `executor.ai_validation_ok` | INFO | AI 验证返回 | `result`（`"合理"` / `"不合理"`）, `reason` |
+| `executor.ai_reselection_ok` | INFO | AI 重选返回 | `result`（重选出的昵称） |
+| `executor.jsonl_written` | INFO | JSONL 日志写入完成 | `trace_id`, `is_failure`, `no_valid_alternative`, `elapsed_ms`, `enrich_keys` |
+| — | WARNING | `enrich_failure` 回调抛异常、AI 验证/重选异常、规则阶段异常、JSONL 写入失败 | 含 `exc_info` |
+
+##### Evolver（`evolver.py`）
+
+| 事件 | 级别 | 触发时机 | 关键字段 |
+|------|------|---------|---------|
+| `Evolver [skill] 开始进化分析` | INFO | `evolve()` 入口 | `skill_name`, `mode`, `min_failure_samples`, `dry_run` |
+| `Evolver [skill] 日志文件不存在` | INFO | 当日 JSONL 不存在 | `skill_name`, `log_path` |
+| `Evolver [skill] 读取 N 条 is_failure 记录` | INFO | JSONL 读取完成 | `skill_name`, 失败数 |
+| `Evolver [skill] 失败样本不足` | INFO | 失败数 < `min_failure_samples` | `skill_name`, `got`, `need` |
+| `Evolver [skill] 运行进化前/后 benchmark` | INFO | benchmark 执行 | `skill_name` |
+| `Evolver [skill] 进化前/后 benchmark: N/M 通过` | INFO | benchmark 结果 | `skill_name`, 通过数, 总数 |
+| `DeepSeek 分析请求失败` | WARNING | API 调用失败 | `skill_name`, `error` |
+| `Evolver [skill] DeepSeek 未提出任何优化建议` | INFO | 分析返回空 | `skill_name` |
+| `Evolver [skill] rules_config 已写入 MySQL + 同步到磁盘` | INFO | 写入成功 | `skill_name` |
+| `Evolver [skill] prompt 已写入 MySQL` | INFO | 写入成功 | `skill_name` |
+| `Evolver [skill] benchmark 退化 … 自动回滚` | WARNING | 通过数下降，触发回滚 | `skill_name`, `pass_before/total_before` → `pass_after/total_after` |
+| `Evolver [skill] 反馈已记录 round=N outcome=X` | INFO | 进化反馈写入 MySQL | `skill_name`, `round`, `outcome` |
+| — | WARNING | 日志读取失败、benchmark 异常、磁盘同步失败、反馈记录失败 | — |
+
+##### enrich_failure 回调（`wx_session_scan_job.py`）
+
+| 事件 | 级别 | 触发时机 | 关键字段 |
+|------|------|---------|---------|
+| `enrich_nickname_failure.start` | INFO | 开始读取 session 文件 | `session_dir`, `exists` |
+| `enrich_nickname_failure.file_loaded` | INFO | 单个文件读取成功 | `file`（文件名）, `size_bytes` |
+| `enrich_nickname_failure.file_not_found` | DEBUG | 文件不存在（如缺少 `customer_metadata.json`） | `file` |
+| `enrich_nickname_failure.file_read_error` | WARNING | 文件读取异常 | `file`, `exc_info` |
+| `enrich_nickname_failure.speaker_json_not_found` | DEBUG | 未找到 speaker JSON | `session_dir`, `total_json_files` |
+| `enrich_nickname_failure.done` | INFO | 回调完成 | `session_dir`, `injected_keys`, `total_size_bytes` |
+
+##### 扫描旁路（`wx_session_scan_job.py`）
+
+| 事件 | 级别 | 触发时机 | 关键字段 |
+|------|------|---------|---------|
+| `evolution_sidecar.start` | INFO | 旁路开始 | `session_dir` |
+| `evolution_sidecar.session_dir_not_found` | DEBUG | session 目录不存在 | `session_dir` |
+| `evolution_sidecar.no_speaker_json` | DEBUG | speaker JSON 未生成 | `session_dir` |
+| `evolution_sidecar.no_debug_session_derived` | DEBUG | debug_session_derived.json 不存在 | `session_dir` |
+| `evolution_sidecar.no_rules_config` | WARNING | 无法加载 rules_config | `session_dir` |
+| `evolution_sidecar.done` | INFO | 旁路完成 | `session_dir`, `source`, `result_text`, `has_warnings` |
+| `evolution_sidecar.failed` | ERROR | 旁路异常 | `session_dir`, `exc_info` |
+
+##### 其他模块
+
+| 模块 | 关键事件 |
+|------|---------|
+| `config_loader.py` | `skill_config 表确认存在`, `skill_evolution_feedback 表确认存在`, `反馈记录写入`, `配置写入: name type vN`, `配置回滚成功: name type → vN` |
+| `feedback_history.py` | `feedback.append`, `feedback.read`, `feedback.read_empty` |
+| `feedback_descent.py` | `feedback_descent.start`, `.initial`, `.candidate`, `.eval`, `.improved`, `.no_improvement`, `.early_stop`, `.done` |
+| `deepseek.py` | 熔断器冷却/触发/关闭, `DeepSeek 请求失败 (attempt)`, `DeepSeek 响应非 JSON` |
+| `logger.py` | `Skill 日志写入失败` (WARNING) |
+| `rule_runner.py` | `rule_runner 跳过非法规则`, `run_block_rules 跳过非法规则` |
+| `run_cache.py` | `cache.init`, `.tree_hash`, `.miss`, `.hit`, `.corrupt`, `.set`, `.clear` |
+| `parallel_eval.py` | `parallel.start`, `.task_ok`, `.task_timeout`, `.task_error`, `.parallel.done` |
+
+#### 3.4.2 日志级别约定
+
+| 级别 | 用途 |
+|------|------|
+| DEBUG | 无需关注的细节（文件未找到、缓存命中、cache 操作） |
+| INFO | 正常路径关键节点（管线开始/阶段完成/写入成功/进化结论） |
+| WARNING | 可恢复的异常（回调异常、API 失败、退化回滚、数值漂移超限） |
+| ERROR | 不可恢复但已捕获（配置校验失败、规则阶段异常） |
+
+#### 3.4.3 调用方约定
+
+`housekeeping_ai_match` 项目侧（`wx_session_scan_job.py`）通过 `from app.logging import get_logger` 获取同一个 structlog logger，日志格式与框架侧完全一致。生产环境（Docker）通过 `app.logging.configure(use_colors=False)` 关闭颜色渲染。
 
 ---
 ### 3.3 分阶段实施安排
@@ -632,3 +772,27 @@ Evolver 当前只有一个 `evolve()` 方法，只读 JSONL，无 MySQL 依赖�
 | V18 | MySQL 为主源实时生效 | Evolver dry_run=False 写入 MySQL → 下一次 execute() 读到新配置 | 14+15 |
 | V19 | 写 MySQL 同步磁盘 | Evolver 写入后 disk YAML 内容与 MySQL 一致 | 15 |
 | V20 | 磁盘种子可回读 | 清空 MySQL 该 Skill 配置 → execute() 首次调用从 disk YAML 自动恢复 | 14 |
+
+#### 3.4.10 enrich_failure 回调测试用例
+
+`enrich_failure` 是 `SkillExecutor` 新增的可选回调参数，用于在写 JSONL 时将 session 文件内容注入 `input_summary`。
+测试文件：`tests/test_executor.py`。
+
+| 编号 | 测试用例 | 输入 | 预期结果 |
+|---|---|---|---|
+| ENR1 | 回调被调用且结果注入 JSONL | `session_dir` 含完整 session 文件，传入有效 `enrich_failure` 回调 | JSONL 条目 `input_summary` 包含 `debug_session_derived_json`、`speaker_json`、`customer_metadata_json` 三个键 |
+| ENR2 | 回调未传入时不影响正常流程 | `session_dir` 含文件，`enrich_failure=None` | JSONL 正常写入，`input_summary` 仅含 `candidates_path`，无额外注入字段 |
+| ENR3 | 回调异常不阻塞管线 | `enrich_failure` 回调解内部抛异常 | `SkillExecutor.run()` 正常完成返回，仅输出 warning 日志，JSONL 仍写入（无注入字段） |
+| ENR4 | 仅 session_dir 模式触发回调 | 传入 `session_dir`（非 `candidates_path`） | `enrich_failure(session_dir)` 被调用，注入数据写入 JSONL |
+| ENR5 | candidates_path 模式不触发回调 | 传入 `candidates_path`（非 `session_dir`） | `enrich_failure` 不被调用，`self._enrichment` 保持空 dict |
+| ENR6 | 部分文件缺失时优雅降级 | `session_dir` 缺少 `customer_metadata.json` | JSONL 仅含 `debug_session_derived_json` + `speaker_json`，不报错 |
+| ENR7 | 文件内容为完整 JSON 字符串 | `debug_session_derived.json` 含 `blocks[]` 等字段 | `input_summary.debug_session_derived_json` 是完整 JSON 字符串（非截断/过滤），含 `blocks[].text/class/band/bbox_xyxy/confidence/speaker_bands[]` |
+
+**测试环境要求**：测试无需真实 DeepSeek API 调用 — 使用 `monkeypatch` 或 `unittest.mock` mock `DeepSeekClient.chat`/`.chat_json` 返回预置响应，仅验证回调注入的数据流。
+
+**验收标准**（V21-V22，关联 enrich_failure 回调机制）：
+
+| 编号 | 验收项 | 通过标准 |
+|---|---|---|
+| V21 | enrich_failure 数据注入完整性 | ENR1-ENR7 全部通过 |
+| V22 | 项目侧 `_enrich_nickname_failure` 端到端 | `housekeeping_ai_match` 的 `wx_session_scan_job._enrich_nickname_failure()` 在真实 session 目录下返回正确的三个键值对，JSONL 可被 Evolver 解析 |

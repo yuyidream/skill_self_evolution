@@ -76,8 +76,8 @@ check("click_coordinate !has min_overlap_area_ratio", "min_overlap_area_ratio" n
 check("click_coordinate !has ambiguity_tie_ratio", "ambiguity_tie_ratio" not in cc)
 check("nickname_attribution !has min_overlap_area_ratio", "min_overlap_area_ratio" not in na)
 check("nickname_attribution !has max_x_px", "max_x_px" not in na)
-check("click_coordinate max_x_px == 15", cc.get("max_x_px") == 15)
-check("click_coordinate max_y_px == 2", cc.get("max_y_px") == 2)
+check("click_coordinate max_x_px == 20", cc.get("max_x_px") == 20)
+check("click_coordinate max_y_px == 0", cc.get("max_y_px") == 0)
 print()
 
 # ---- Test 4: _judge_correctness consumes 6 bad_categories ----

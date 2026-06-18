@@ -59,9 +59,18 @@ class SkillExecutor:
         deepseek_api_key: str = "",
         deepseek_api_base: str = "https://api.deepseek.com/v1",
         deepseek_model: str = "deepseek-v4-flash",
+        enrich_failure: "Callable[[str], dict[str, str]] | None" = None,
     ):
+        """
+        Args:
+            enrich_failure: 可选回调，入参 session_dir 路径，返回 dict[str, str]。
+                           返回的键值对会注入到 JSONL 的 input_summary 中，
+                           供 Evolver 分析时传递 session 文件内容给 LLM。
+        """
         self.skill_name = skill_name
         self.ai_role = ai_role
+        self._enrich_failure = enrich_failure
+        self._enrichment: dict[str, str] = {}
 
         self._deepseek = DeepSeekClient(
             api_key=deepseek_api_key,
@@ -103,6 +112,15 @@ class SkillExecutor:
 
         warnings: list[str] = []
 
+        data_source_label = "session_dir" if session_dir else ("candidates_path" if candidates_path else "none")
+        logger.info(
+            "executor.start",
+            skill_name=self.skill_name,
+            ai_role=self.ai_role,
+            source=data_source_label,
+            trace_id=effective_trace_id,
+        )
+
         # 2. Pydantic 入口校验 — rules_config / prompt_config 格式不对立刻报错
         try:
             if rules_config is not None:
@@ -110,7 +128,7 @@ class SkillExecutor:
             if prompt_config is not None:
                 prompt_config = PromptConfigModel.model_validate(prompt_config).model_dump()
         except Exception as e:
-            logger.exception("Executor [%s] 配置校验失败: %s", self.skill_name, e)
+            logger.exception("executor.config_validation_failed", skill_name=self.skill_name, error=str(e))
             elapsed = (time.monotonic() - start_time) * 1000
             output = SkillOutput(
                 source="rule",
@@ -130,6 +148,20 @@ class SkillExecutor:
                 # 从 session 目录加载候选块
                 candidates = self._load_candidates_from_session(session_dir)
                 data_source = session_dir
+                # 调用 enrich_failure 回调，加载 session 文件内容供 Evolver 分析
+                self._enrichment = {}
+                if self._enrich_failure:
+                    try:
+                        self._enrichment = self._enrich_failure(session_dir)
+                        logger.info(
+                            "executor.enrich_failure_ok",
+                            skill_name=self.skill_name,
+                            session_dir=session_dir,
+                            injected_keys=list(self._enrichment.keys()),
+                            injected_count=len(self._enrichment),
+                        )
+                    except Exception as e:
+                        logger.warning("Executor [%s] enrich_failure 回调异常: %s", self.skill_name, e)
             else:
                 candidates = self._load_candidates(candidates_path)
                 data_source = candidates_path
@@ -141,6 +173,13 @@ class SkillExecutor:
                 result=filtered[0] if filtered else "",
             ).model_dump()
             rule_output = SkillOutput(source="rule", result=rule_result)
+            logger.info(
+                "executor.rule_stage_ok",
+                skill_name=self.skill_name,
+                candidates_count=len(candidates),
+                filtered_count=len(filtered),
+                result=str(rule_result.get("result", ""))[:80],
+            )
         except Exception as e:
             logger.exception("Executor [%s] 规则阶段异常", self.skill_name)
             elapsed = (time.monotonic() - start_time) * 1000
@@ -170,6 +209,12 @@ class SkillExecutor:
             try:
                 ai_validation = await self._ai_validate(rule_output, prompt_config)
                 rule_output.ai_validated = True
+                logger.info(
+                    "executor.ai_validation_ok",
+                    skill_name=self.skill_name,
+                    result=ai_validation.result if ai_validation else "N/A",
+                    reason=(ai_validation.reason if ai_validation else "")[:120],
+                )
             except Exception as e:
                 logger.warning("Executor [%s] AI 验证异常: %s", self.skill_name, e)
                 fb_result = fallback.on_validate_failure(e)
@@ -193,6 +238,11 @@ class SkillExecutor:
 
                 try:
                     ai_reselection = await self._ai_reselect(rule_output, prompt_config)
+                    logger.info(
+                        "executor.ai_reselection_ok",
+                        skill_name=self.skill_name,
+                        result=str(ai_reselection.result)[:80] if ai_reselection else "N/A",
+                    )
                     if ai_reselection and ai_reselection.result != "不合理":
                         selected = ai_reselection.result
                         if isinstance(selected, dict):
@@ -505,7 +555,9 @@ class SkillExecutor:
     ) -> None:
         try:
             log_writer = SkillLogger(self.skill_name)
-            input_summary = {"candidates_path": candidates_source}
+            input_summary: dict[str, Any] = {"candidates_path": candidates_source}
+            if self._enrichment:
+                input_summary.update(self._enrichment)
 
             log_writer.log_execution(
                 trace_id=trace_id,
@@ -518,6 +570,15 @@ class SkillExecutor:
                 final_output=final_output.result,
                 warnings=warnings,
                 elapsed_ms=round(elapsed_ms, 1),
+            )
+            logger.info(
+                "executor.jsonl_written",
+                skill_name=self.skill_name,
+                trace_id=trace_id,
+                is_failure=is_failure,
+                no_valid_alternative=no_valid_alternative,
+                elapsed_ms=round(elapsed_ms, 1),
+                enrich_keys=list(self._enrichment.keys()) if self._enrichment else [],
             )
         except Exception as e:
             logger.warning("Executor 日志记录失败: %s", e)
