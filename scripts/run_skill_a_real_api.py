@@ -19,7 +19,7 @@ from skill_self_evolution import SkillExecutor, ConfigVersionManager
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("skill_a_real_api")
 
-API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-6447e6c91a6f45a0b29373af216ea530")
+API_KEY = os.getenv("DEEPSEEK_API_KEY")
 DB_CONFIG = {"host": "127.0.0.1", "port": 3306, "user": "rootyuyi", "password": "YU820124yi", "database": "housekeeping_ai_match_dev"}
 SKILL_BASE = Path("E:/projects/housekeeping_ai_match/backend/config/services/skill")
 SESSION_BASE = Path("E:/projects/housekeeping_ai_match/build/wx_match_sessions/wechat/ahxvcp3910405060")
@@ -87,7 +87,7 @@ async def main():
     logger.info("提取 %d 个昵称案例", len(cases))
 
     # Step 3: 执行
-    executor = SkillExecutor(skill_base_dir=SKILL_BASE, deepseek_api_key=API_KEY, deepseek_api_base="https://api.deepseek.com/v1", deepseek_model="deepseek-chat")
+    executor = SkillExecutor(skill_base_dir=SKILL_BASE, deepseek_api_key=API_KEY, deepseek_api_base=os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1"), deepseek_model=os.getenv("DEEPSEEK_MODEL", "deepseek-chat"))
     logger.info("SkillExecutor 初始化: model=deepseek-chat, api=api.deepseek.com")
 
     results = []

@@ -2,8 +2,6 @@
 import sys, os
 sys.path.insert(0, r'E:\projects\skill_self_evolution\src')
 
-os.environ['DEEPSEEK_API_KEY'] = 'sk-6447e6c91a6f45a0b29373af216ea530'
-
 from scripts.closed_loop_opencode_v2 import (
     restore, apply_hallucination, replace_code, run_e2e, run_candidate_replay,
     ask_via_opencode, extract_code, SYSTEM_COMBINED, TARGET, orig_content

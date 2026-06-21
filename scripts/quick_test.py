@@ -6,9 +6,9 @@ from pathlib import Path
 async def main():
     executor = SkillExecutor(
         skill_base_dir=Path(r'E:/projects/housekeeping_ai_match/backend/config/services/skill'),
-        deepseek_api_key='sk-6447e6c91a6f45a0b29373af216ea530',
+        deepseek_api_key=os.getenv('DEEPSEEK_API_KEY'),
         deepseek_api_base='https://api.deepseek.com/v1',
-        deepseek_model='deepseek-chat',
+        deepseek_model=os.getenv('DEEPSEEK_MODEL', 'deepseek-chat'),
     )
     result = await executor.run('nickname-selector', {
         'screenshot_id': 'scr_004',

@@ -12,10 +12,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 os.environ["DB_PASSWORD"] = "local_root_123"
 os.environ["SKILL_LOG_DIR"] = "C:/data/skill-logs"
-os.environ["DEEPSEEK_API_KEY"] = "sk-6447e6c91a6f45a0b29373af216ea530"
 os.environ["DEEPSEEK_API_BASE"] = "https://api.deepseek.com/v1"
-os.environ["DEEPSEEK_MODEL"] = "deepseek-chat"
-
 BEIJING_TZ = timezone(timedelta(hours=8))
 rng = Random(42)
 

@@ -1,6 +1,7 @@
 import asyncio, httpx, json, os
+from dotenv import load_dotenv; load_dotenv()
 
-API_KEY = os.getenv("DEEPSEEK_API_KEY", "sk-6447e6c91a6f45a0b29373af216ea530")
+API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
 async def t():
     c = httpx.AsyncClient(timeout=30)

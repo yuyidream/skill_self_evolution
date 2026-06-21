@@ -11,7 +11,6 @@ from typing import Optional
 
 # ── 路径 & 环境 ─────────────────────────────────────────────────
 sys.path.insert(0, r"E:\projects\skill_self_evolution\src")
-os.environ["DEEPSEEK_API_KEY"] = "sk-6447e6c91a6f45a0b29373af216ea530"
 os.environ["DB_PASSWORD"] = "local_root_123"
 
 TARGET = Path("E:/projects/housekeeping_ai_match/scripts/wx_match/processor/nickname_ocr_simple.py")
@@ -24,7 +23,7 @@ _BACKUP.write_text(orig_content, "utf-8")  # 独立备份，不受文件状态�
 # ── harness 选项 ─────────────────────────────────────────────────
 HARNESS_OPTIONS = {
     "provider_id": "deepseek",
-    "model_id": "deepseek-chat",
+    "model_id": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
     "mode": "build",
     "cwd": str(BACKEND),  # opencode serve 以 backend 为工作目录
 }

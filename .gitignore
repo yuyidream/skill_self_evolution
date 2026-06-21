@@ -6,3 +6,4 @@ build/
 *.jsonl
 .venv/
 .pytest_cache/
+.env

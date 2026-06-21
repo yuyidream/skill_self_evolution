@@ -1,6 +1,5 @@
 import asyncio, os, sys, json
 sys.path.insert(0, 'src')
-os.environ['DEEPSEEK_API_KEY'] = 'sk-6447e6c91a6f45a0b29373af216ea530'
 from skill_self_evolution.harness.opencode.executor import execute_query
 
 async def debug():

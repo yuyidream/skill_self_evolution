@@ -36,7 +36,6 @@ from datetime import datetime, timezone, timedelta
 os.environ["STRUCTLOG_JSON"] = "false"
 os.environ["DB_PASSWORD"] = "local_root_123"
 os.environ["DB_NAME"] = "housekeeping_ai_match_dev"
-os.environ["DEEPSEEK_API_KEY"] = "sk-6447e6c91a6f45a0b29373af216ea530"
 BEIJING_TZ = timezone(timedelta(hours=8))
 
 PROJECT_ROOT = Path("E:/projects/housekeeping_ai_match")
@@ -366,7 +365,7 @@ class OpenCodeProposer(Proposer[str]):
     def _options(self) -> dict:
         return {
             "provider_id": "deepseek",
-            "model_id": "deepseek-chat",
+            "model_id": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
             "mode": "build",
             "cwd": str(PROJECT_ROOT),
             "system": textwrap.dedent(f"""\

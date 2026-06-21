@@ -15,10 +15,7 @@ from pathlib import Path
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
-os.environ["DEEPSEEK_API_KEY"] = "sk-6447e6c91a6f45a0b29373af216ea530"
 os.environ["DEEPSEEK_API_BASE"] = "https://api.deepseek.com/v1"
-os.environ["DEEPSEEK_MODEL"] = "deepseek-chat"
-
 sys.path.insert(0, "E:/projects/skill_self_evolution/src")
 
 from skill_self_evolution.deepseek import DeepSeekClient

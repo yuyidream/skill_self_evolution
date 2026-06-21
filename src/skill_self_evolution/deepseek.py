@@ -194,6 +194,12 @@ class DeepSeekClient:
         max_tokens: int,
         timeout: float,
     ) -> DeepSeekChatResponse:
+        if not self._api_key:
+            raise RuntimeError(
+                "DEEPSEEK_API_KEY 未配置。"
+                "进化旁路（SkillExecutor / Evolver）依赖此环境变量；"
+                "请在 docker-compose 或 .env 中设置 DEEPSEEK_API_KEY"
+            )
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._api_key}",

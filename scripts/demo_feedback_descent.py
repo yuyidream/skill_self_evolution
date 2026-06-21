@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, r"E:\projects\skill_self_evolution\src")
-os.environ["DEEPSEEK_API_KEY"] = "sk-6447e6c91a6f45a0b29373af216ea530"
 os.environ["DB_PASSWORD"] = "local_root_123"
 
 from skill_self_evolution.logging import get_logger
@@ -183,7 +182,7 @@ async def generate_candidate(prompt: str) -> str:
     """通过 harness 调用 DeepSeek 生成代码候选"""
     options = {
         "provider_id": "deepseek",
-        "model_id": "deepseek-chat",
+        "model_id": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
         "mode": "build",
         "cwd": str(BACKEND),
         "system": SYSTEM_PROMPT,

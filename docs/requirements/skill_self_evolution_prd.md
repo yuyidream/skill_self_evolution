@@ -394,6 +394,9 @@ speaker-structurer 不替代生产管线，而是作为**旁路质检**：
 
 **上游2：prompt结果判断**（匹配评分）。
 （三）匹配评分prompt的自我进化方案
+
+等着AI模型进化或者客户反馈多了之后再做，先不做！！
+
 AI 按 prompt 对简历-订单匹配进行语义评分（0-22 分），结果在 H5 页面展示。用户点击「匹配不正确」（可选补充不正确的原因）后写入 wx_match_feedback 表。Evolver 读取用户负面反馈，经 DeepSeek 分析后优化 prompt.yaml（需人工确认，因 prompt 结果具有概率性），同时可优化 rules_config 中各维度的分值与权重。
 
 | | 上游1: 数据处理规则结果判断 | 上游2: prompt结果判断 |

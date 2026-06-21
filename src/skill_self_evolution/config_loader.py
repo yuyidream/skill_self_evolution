@@ -281,6 +281,21 @@ class ConfigVersionManager:
         )
         return training, excluded
 
+    def get_golden_set_size(self) -> int:
+        """获取 Golden set 大小（nickname_golden_label 表）。
+
+        Returns:
+            标注样本数量
+        """
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            try:
+                cur.execute("SELECT COUNT(*) FROM nickname_golden_label")
+                row = cur.fetchone()
+                return int(row[0]) if row else 0
+            except Exception:
+                return 0
+
     def _parse_json_field(self, value) -> Any:
         """解析 JSON 字段（MySQL JSON 列可能返回 str 或已解析对象）。"""
         if value is None:
@@ -409,6 +424,24 @@ class ConfigVersionManager:
             logger.debug("skill_config 未找到: %s/%s", skill_name, config_type)
             return None
         return yaml_safe.load(row[0])
+
+    def load_version(self, skill_name: str, config_type: str) -> int | None:
+        """获取当前激活版本的版本号（不加载内容）。
+
+        Returns:
+            版本号，未找到配置时返回 None
+        """
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT version FROM skill_config WHERE skill_name = %s AND config_type = %s",
+                (skill_name, config_type),
+            )
+            row = cur.fetchone()
+        if row is None:
+            logger.debug("skill_config 未找到: %s/%s", skill_name, config_type)
+            return None
+        return row[0]
 
     def load_raw(self, skill_name: str, config_type: str) -> str | None:
         """加载原始 YAML 字符串（用于进化分析 prompt 注入）。"""

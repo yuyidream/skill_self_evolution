@@ -13,10 +13,7 @@ from ruamel.yaml import YAML
 
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 os.environ["DB_PASSWORD"] = "local_root_123"
-os.environ["DEEPSEEK_API_KEY"] = "sk-6447e6c91a6f45a0b29373af216ea530"
 os.environ["DEEPSEEK_API_BASE"] = "https://api.deepseek.com/v1"
-os.environ["DEEPSEEK_MODEL"] = "deepseek-chat"
-
 # ══ YAML diff（目标） ══
 yaml_diff = """
 card_binding 条件新增两参数:

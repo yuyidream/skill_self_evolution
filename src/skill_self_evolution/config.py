@@ -8,7 +8,14 @@ DeepSeek API 与数据库配置 — 通用，不绑定任何业务项目。
 
 import os
 
+from dotenv import load_dotenv
+
 from pydantic import BaseModel, Field
+
+# ═══════════════════════════════════════════════════════════════
+# 模块加载时自动将 .env 注入 os.environ，使所有脚本无需手动 set
+# ═══════════════════════════════════════════════════════════════
+load_dotenv()  # 优先当前工作目录的 .env；容器内由 docker-compose 注入覆盖
 
 __all__ = ["DeepSeekEnvConfig", "DbConfig", "get_deepseek_config", "get_db_config"]
 
@@ -45,10 +52,13 @@ def get_deepseek_config(
             api_base=api_base,
             model=model or "deepseek-chat",
         )
+    _ak = api_key or os.getenv("DEEPSEEK_API_KEY", "")
+    _ab = api_base or os.getenv("DEEPSEEK_API_BASE", "") or "https://api.deepseek.com/v1"
+    _m = model or os.getenv("DEEPSEEK_MODEL", "") or "deepseek-chat"
     return DeepSeekEnvConfig(
-        api_key=api_key or os.getenv("DEEPSEEK_API_KEY", ""),
-        api_base=api_base or os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1"),
-        model=model or os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        api_key=_ak,
+        api_base=_ab,
+        model=_m,
     )
 
 

@@ -278,13 +278,11 @@ class Evolver:
 
     def _get_golden_set_size(self) -> int:
         """查询 Golden set 大小（nickname_golden_label 表）。"""
-        try:
-            if self._version_mgr and hasattr(self._version_mgr, "_cursor"):
-                self._version_mgr._cursor.execute("SELECT COUNT(*) FROM nickname_golden_label")
-                row = self._version_mgr._cursor.fetchone()
-                return int(row[0]) if row else 0
-        except Exception:
-            pass
+        if self._version_mgr:
+            try:
+                return self._version_mgr.get_golden_set_size()
+            except Exception as e:
+                logger.warning("Evolver [%s] Golden set 查询失败: %s", self.skill_name, e)
         return 0
 
     async def _analyze_failures(
@@ -421,8 +419,7 @@ class Evolver:
             if mode in ("both", "rules_only"):
                 current_rules = self._version_mgr.load_raw(self.skill_name, "rules_config") or ""
                 try:
-                    rules_cfg = self._version_mgr.load(self.skill_name, "rules_config")
-                    version_before = rules_cfg.get("version") if rules_cfg else None
+                    version_before = self._version_mgr.load_version(self.skill_name, "rules_config")
                 except Exception:
                     pass
             if mode in ("both", "prompt_only"):

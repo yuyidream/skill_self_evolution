@@ -92,5 +92,5 @@
 | # | EvoSkill 功能 | 评估结果 | 状态 |
 |---|---|---|---|
 | 1 | 反馈历史学习 | 值得复用，已实施 | ✅ 已实施 |
-| 2 | OpenCode harness 写代码自动进化 | 不可行，参见 `opencode_harness_assessment.md` | ❌ 不实施 |
+| 2 | OpenCode harness 写代码自动进化 | 已跑通，参见 `opencode_harness_assessment.md` | ✅ 已实施 |
 | 3 | prompt 自动进化增强 | 已有基础，已增强 | ✅ 已实施 |
