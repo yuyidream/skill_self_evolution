@@ -7,6 +7,9 @@ skill-engine DeepSeekClient（熔断、重试、JSON 解析）。
 
 import asyncio
 import json
+import os
+import sys
+import traceback
 from skill_self_evolution.logging import get_logger
 
 logger = get_logger(__name__)
@@ -89,6 +92,19 @@ class CircuitBreaker:
             self._open = False
             logger.info("熔断器关闭（请求成功）")
 
+
+# ── 调用来源追踪 ──
+
+def _resolve_caller() -> str:
+    """从调用栈中找到第一个非 deepseek.py 的帧，返回 `脚本名:函数名`。"""
+    this_file = os.path.abspath(__file__)
+    for frame in traceback.extract_stack():
+        if os.path.abspath(frame.filename) != this_file:
+            script = os.path.basename(frame.filename)
+            func = frame.name
+            line = frame.lineno
+            return f"{script}:{func}:L{line}"
+    return "unknown"
 
 # ── 统一客户端 ──
 
@@ -200,6 +216,13 @@ class DeepSeekClient:
                 "进化旁路（SkillExecutor / Evolver）依赖此环境变量；"
                 "请在 docker-compose 或 .env 中设置 DEEPSEEK_API_KEY"
             )
+
+        # 记录调用来源（脚本 + 函数），便于审计高频调用
+        _caller = _resolve_caller()
+        logger.info(
+            "DeepSeek API 调用 → model=%s tokens(max)=%d caller=%s",
+            self._model, max_tokens, _caller,
+        )
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self._api_key}",

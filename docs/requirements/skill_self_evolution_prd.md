@@ -320,6 +320,26 @@ benchmark 读取逻辑：查询 `nickname_golden_label WHERE session_id=? AND sp
 
 
 
+#### 附录：skill_self_evolution和opencode分工和密钥使用：
+
+┌─────────────────────────────────────────┐  ┌─────────────────────────────────────┐
+│          opencode 体系                    │  │      skill_self_evolution 体系       │
+│                                          │  │                                     │
+│  opencode.jsonc                          │  │  .env / SKILL_DEEPSEEK_API_KEY       │
+│  ├─ provider: deepseek                   │  │  └─→ DEEPSEEK_API_KEY                 │
+│  │  ├─ apiKey: sk-03ed...                │  │      └─→ DeepSeekClient (直连API)     │
+│  │  └─ baseURL: api.deepseek.com/v1      │  │          └─→ 34个非harness脚本        │
+│  └─ model: deepseek/deepseek-v4-pro      │  │          └─→ Consumer容器进化AI        │
+│                          ▲               │  │                                     │
+│  4 个 harness 脚本 ──────┘                │  │ 密钥: sk-af55...                     │
+│  (只负责启动服务+发查询)                    │  │ 模型: deepseek-V4-PRO               │
+│                                          │  │                                     │
+│  密钥: sk-03ed...                         │  │                                     │
+│  模型: deepseek-V4-PRO                     │  │                                     │
+└─────────────────────────────────────────┘  └─────────────────────────────────────┘
+harness executor.py 删掉了全部密钥注入逻辑，opencode 完全自治。两个体系密钥隔离、模型独立、边界清晰。
+
+
 （二）发言人结构化规则的自我进化方案
 
 ### 现状：有两套「结构化」，职责不同----speaker-structurer Skill还是空壳，没补充内容没切换。前期直接用AI读session并给出第一版规则？？？

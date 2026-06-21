@@ -3,6 +3,9 @@
 Uses raw httpx to talk to the opencode server (the Python SDK sends
 model/provider as flat fields which the server ignores; the correct
 format is a nested ``model: {providerID, modelID}`` object).
+
+Authentication: opencode reads its own config file (opencode.jsonc).
+The harness does NOT inject keys — keep provider config in opencode.jsonc.
 """
 
 from __future__ import annotations
@@ -20,42 +23,12 @@ from typing import Any, Callable, Type
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from ..provider_auth import (
-    PROVIDER_ENV_KEYS,
-    apply_provider_auth_env,
-    ensure_provider_api_key,
-)
-
 # ── module-level state ────────────────────────────────────────────────
 _SERVER_PORTS: dict[str, int] = {}
 _SERVER_PIDS: dict[str, int] = {}
 _SPAWNED_THIS_RUN: set[str] = set()
 
 _TIMEOUT = 1800  # per-request HTTP timeout (30 min — opencode agents can take 15+ min on complex queries)
-
-
-# ── provider auth ─────────────────────────────────────────────────────
-
-def _push_provider_auth(base_url: str) -> None:
-    """Push all available API keys from env into the opencode server's auth store.
-
-    The opencode server reads credentials from its own auth store, not env vars.
-    This syncs any provider keys found in the environment so the server can
-    authenticate regardless of which provider the user configures.
-    """
-    for provider, env_vars in PROVIDER_ENV_KEYS.items():
-        for var in env_vars:
-            key = os.environ.get(var)
-            if key:
-                try:
-                    httpx.put(
-                        f"{base_url}/auth/{provider}",
-                        json={"type": "api", "key": key},
-                        timeout=5,
-                    )
-                except Exception:
-                    pass
-                break
 
 
 # ── server lifecycle ──────────────────────────────────────────────────
@@ -144,7 +117,6 @@ def _ensure_server(options: dict[str, Any]) -> str:
 
     port = _find_free_port()
     env = dict(os.environ)
-    apply_provider_auth_env(options.get("provider_id"), env)
 
     proc = subprocess.Popen(
         ["opencode", "serve", "--port", str(port), "--hostname", "127.0.0.1"],
@@ -161,7 +133,6 @@ def _ensure_server(options: dict[str, Any]) -> str:
     _wait_for_port(port)
 
     base_url = f"http://127.0.0.1:{port}"
-    _push_provider_auth(base_url)
     return base_url
 
 
@@ -171,7 +142,6 @@ async def execute_query(options: dict[str, Any], query: str) -> list[Any]:
     if not isinstance(options, dict):
         raise TypeError(f"OpenCode executor requires dict options, got {type(options)}")
 
-    ensure_provider_api_key(options.get("provider_id"))
     base_url = _ensure_server(options)
 
     async with httpx.AsyncClient(base_url=base_url, timeout=_TIMEOUT) as client:
