@@ -339,6 +339,32 @@ benchmark 读取逻辑：查询 `nickname_golden_label WHERE session_id=? AND sp
 └─────────────────────────────────────────┘  └─────────────────────────────────────┘
 harness executor.py 删掉了全部密钥注入逻辑，opencode 完全自治。两个体系密钥隔离、模型独立、边界清晰。
 
+#### 附录：skill_self_evolution的AI调用日志
+
+每次 `DeepSeekClient._do_chat()` 实际发出 HTTP 请求前，会记录一条 INFO 日志，格式：
+
+```
+DeepSeek API 调用 → model=deepseek-v4-pro tokens(max)=4096 caller=evolve_v4.py:evolve:L42
+```
+
+**字段说明**：
+
+| 字段 | 说明 |
+|---|---|
+| `model` | 当前使用的模型名（来自 `DEEPSEEK_MODEL` 环境变量） |
+| `tokens(max)` | 请求的 `max_tokens` 上限 |
+| `caller` | `脚本名:函数名:L行号`，从调用栈回溯到第一个跳出 `deepseek.py` 的帧 |
+
+**覆盖范围**：
+
+- `skill_self_evolution` 的 34 个非 harness 脚本 + `SkillExecutor` / `Evolver`（全部走 `DeepSeekClient`）
+- `housekeeping_ai_match` 的 Match Scoring / AI Structuring / Ping（复用同一 `DeepSeekClient`）
+
+**审计价值**：当日志中出现同一 caller 高频调用时（如昨天的 8000 次），可直接定位源头脚本和函数，无需全网 grep。日志行由 structlog 输出到 skill execution log（JSONL），可通过 `caller` 字段聚合统计。
+
+注意：opencode harness 脚本走的是 opencode server 自有的 API 调用路径，不经过 `DeepSeekClient`，因此不产生此类日志（使用 opencode 自身的用量统计）。
+
+
 
 （二）发言人结构化规则的自我进化方案
 

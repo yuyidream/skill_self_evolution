@@ -1,10 +1,6 @@
-"""从 debug_session_derived.json 中提取所有规则会选到但实际错误的昵称。
+"""从 session_derived_v1.json 中提取所有最终确定的昵称，检查是否匹配坏模式。
 
-模拟 _rule_extract 的行为：
-1. 取每个 band 的第一个 nickname_candidate
-2. 过滤 band=None
-3. 剩下的是规则输出
-4. 检查是否错误
+读取管线的最终产物 speaker_nicknames，而非 OCR 第一个候选。
 """
 import json, sys, re
 from pathlib import Path
@@ -47,15 +43,8 @@ def is_bad(text):
             return cat
     return ''
 
-def _get_screenshots(debug):
-    if isinstance(debug, list):
-        return debug
-    if isinstance(debug, dict):
-        return debug.get('screenshots', [])
-    return []
-
 bad_cases = []
-all_rule_outputs = 0
+all_nicknames = 0
 
 for date_dir in sorted(BASE.iterdir()):
     if not date_dir.is_dir():
@@ -63,76 +52,48 @@ for date_dir in sorted(BASE.iterdir()):
     for session_dir in sorted(date_dir.iterdir()):
         if not session_dir.is_dir():
             continue
-        debug_path = session_dir / 'debug_session_derived.json'
-        meta_path = session_dir / 'metadata.json'
-        if not debug_path.exists() or not meta_path.exists():
+        derived_path = session_dir / 'session_derived_v1.json'
+        if not derived_path.exists():
             continue
 
-        with open(debug_path, encoding='utf-8') as f:
-            debug = json.load(f)
+        with open(derived_path, encoding='utf-8') as f:
+            derived = json.load(f)
+        if not isinstance(derived, dict):
+            continue
 
-        for scr in _get_screenshots(debug):
-            if not isinstance(scr, dict):
+        speaker_nicknames = derived.get('speaker_nicknames', [])
+        if not isinstance(speaker_nicknames, list):
+            continue
+
+        for sn in speaker_nicknames:
+            if not isinstance(sn, dict):
                 continue
-            sid = scr.get('screenshot_id', '')
-            blocks = scr.get('blocks', [])
+            nickname = sn.get('text', '').strip()
+            if not nickname:
+                continue
+            all_nicknames += 1
 
-            # 按 band 收集 nickname_candidate
-            band_candidates = {}
-            for blk in blocks:
-                if not isinstance(blk, dict):
-                    continue
-                if blk.get('class') != 'nickname_candidate':
-                    continue
-                txt = blk.get('text', '').strip()
-                if not txt:
-                    continue
-                band = str(blk.get('band', ''))
-                if band not in band_candidates:
-                    band_candidates[band] = []
-                if txt not in band_candidates[band]:
-                    band_candidates[band].append(txt)
+            bad_cat = is_bad(nickname)
+            if not bad_cat:
+                continue
 
-            # 模拟 _rule_extract: 过滤 band=None, 取第一个
-            for band, candidates in band_candidates.items():
-                if band == 'None' or band == '':
-                    # band=None 被规则过滤
-                    continue
-                if not candidates:
-                    continue
-                rule_pick = candidates[0]
-                all_rule_outputs += 1
+            bad_cases.append({
+                'session_name': session_dir.name,
+                'screenshot_id': sn.get('screenshot_id', ''),
+                'nickname': nickname,
+                'band_id': sn.get('band', ''),
+                'category': bad_cat,
+            })
 
-                bad_cat = is_bad(rule_pick)
-                if not bad_cat:
-                    continue
-
-                good_candidates = [c for c in candidates[1:] if not is_bad(c)]
-
-                bad_cases.append({
-                    'session_name': session_dir.name,
-                    'screenshot_id': sid,
-                    'band_id': band,
-                    'nickname': rule_pick,
-                    'candidates': candidates[:10],
-                    'good_candidates': good_candidates[:5],
-                    'category': bad_cat,
-                    'metadata_path': str(meta_path),
-                    'debug_session_derived_path': str(debug_path),
-                })
-
-print(f'Total rule outputs (band != None): {all_rule_outputs}')
-print(f'Bad cases found: {len(bad_cases)}')
+print(f'Total final nicknames: {all_nicknames}')
+print(f'Bad nicknames found: {len(bad_cases)}')
 
 cats = Counter(c['category'] for c in bad_cases)
 print(f'Categories: {dict(cats)}')
 
 for i, c in enumerate(bad_cases[:40]):
     print(f'  [{i}] {c["session_name"][:40]}/{c["screenshot_id"]} band={c["band_id"]}')
-    print(f'       rule={c["nickname"][:60]} ({c["category"]})')
-    print(f'       candidates={[x[:40] for x in c["candidates"][:4]]}')
-    if c["good_candidates"]:
-        print(f'       good={[x[:40] for x in c["good_candidates"][:4]]}')
+    print(f'       nickname={c["nickname"][:60]} ({c["category"]})')
 
 # Save
 out_path = Path(r'E:/projects/skill_self_evolution/data/real_failure_cases.json')
