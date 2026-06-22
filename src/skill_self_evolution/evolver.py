@@ -79,6 +79,8 @@ class EvolveProposal:
         self.failure_count: int = 0
         self.training_set_size: int = 0
         self.validation_set_size: int = 0
+        self.version_before: int | None = None
+        self.version_after: int | None = None
         self.benchmark_before: tuple[int, int, list] = (0, 0, [])
         self.benchmark_after: tuple[int, int, list] = (0, 0, [])
         self.applied: bool = False
@@ -94,6 +96,8 @@ class EvolveProposal:
             failure_count=self.failure_count,
             training_set_size=self.training_set_size,
             validation_set_size=self.validation_set_size,
+            version_before=self.version_before,
+            version_after=self.version_after,
             applied=self.applied,
             rolled_back=self.rolled_back,
         )
@@ -161,68 +165,85 @@ class Evolver:
             return self._log_dir
         return _get_log_dir(self.skill_name)
 
-    def _load_failure_logs(self, date_str: str | None = None) -> list[dict]:
-        target_date = date_str or _yesterday_str()
+    def _load_failure_logs_cumulative(self, since_log_id: int = 0) -> list[dict]:
+        """加载**累计未处理**的失败日志（id > since_log_id 的所有 is_failure 记录）。
 
+        Args:
+            since_log_id: 上次进化已处理的最大 log id（0 表示全量）
+        """
         # 优先 MySQL
         if self._version_mgr:
             try:
                 self._version_mgr.ensure_execution_log_table()
-                failures = self._version_mgr.load_failure_logs(self.skill_name, target_date)
+                failures = self._version_mgr.load_failure_logs_cumulative(self.skill_name, since_log_id)
                 logger.info(
-                    "Evolver [%s] 从 MySQL 读取 %d 条 is_failure 记录 (date=%s)",
-                    self.skill_name, len(failures), target_date,
+                    "Evolver [%s] 从 MySQL 读取 %d 条累计未处理 is_failure 记录 (since_id=%d)",
+                    self.skill_name, len(failures), since_log_id,
                 )
                 return failures
             except Exception as e:
                 logger.warning("Evolver [%s] MySQL 读取失败，回退 JSONL: %s", self.skill_name, e)
 
-        # 回退 JSONL
-        log_path = self.log_dir / f"{target_date}.jsonl"
-        if not log_path.exists():
-            logger.info("Evolver [%s] 日志文件不存在: %s", self.skill_name, log_path)
-            return []
+        # 回退 JSONL（简化：读所有 JSONL 文件，无法按 id 过滤）
+        all_failures = []
+        if self.log_dir.exists():
+            for jsonl_file in sorted(self.log_dir.glob("*.jsonl")):
+                try:
+                    with open(jsonl_file, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                entry = json.loads(line)
+                                if entry.get("is_failure", False):
+                                    all_failures.append(entry)
+                            except json.JSONDecodeError:
+                                continue
+                except Exception as e:
+                    logger.warning("Evolver [%s] 日志读取失败 %s: %s", self.skill_name, jsonl_file, e)
 
-        failures = []
-        try:
-            with open(log_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        if entry.get("is_failure", False):
-                            failures.append(entry)
-                    except json.JSONDecodeError:
-                        continue
-        except Exception as e:
-            logger.warning("Evolver [%s] 日志读取失败: %s", self.skill_name, e)
-            return []
+        logger.info("Evolver [%s] 从 JSONL 读取 %d 条累计 is_failure 记录", self.skill_name, len(all_failures))
+        return all_failures
 
-        logger.info("Evolver [%s] 从 JSONL 读取 %d 条 is_failure 记录", self.skill_name, len(failures))
-        return failures
+    def _get_evolution_state(self) -> dict:
+        """获取进化追踪状态：上次已处理的最大 log id。"""
+        state_file = self.log_dir / ".evolve_state.json"
+        if state_file.exists():
+            try:
+                return json.loads(state_file.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {"last_processed_log_id": 0}
 
-    def _build_training_set(self, exclude_date: str | None = None) -> tuple[list[dict], int]:
-        """构建训练集：历史所有 is_failure=true，排除 exclude_date。
+    def _save_evolution_state(self, state: dict) -> None:
+        """保存进化追踪状态。"""
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        state_file = self.log_dir / ".evolve_state.json"
+        state_file.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
 
-        PRD §B.1：训练集 = 历史失败 - 当天新增失败（防循环自证）。
+    def _build_training_set(self, exclude_session_date: str | None = None) -> tuple[list[dict], int]:
+        """构建训练集：历史所有 is_failure=true，排除当前批次的 session_date。
+
+        训练集 = 历史失败 - 当前批次失败（防循环自证）。
+        当前批次的 session_date 由调用方传入（通常为今天的日期 YYYY-MM-DD）。
 
         Returns:
-            (training_entries, excluded_count): 训练样本列表 + 当天排除数
+            (training_entries, excluded_count): 训练样本列表 + 当前批次排除数
         """
-        target_date = exclude_date or _yesterday_str()
+        today_str = datetime.now(_BEIJING_TZ).strftime("%Y-%m-%d")
+        exclude_date = exclude_session_date or today_str
 
         # 优先 MySQL
         if self._version_mgr:
             try:
                 self._version_mgr.ensure_execution_log_table()
                 training, excluded = self._version_mgr.load_training_set(
-                    self.skill_name, target_date
+                    self.skill_name, exclude_date
                 )
                 logger.info(
-                    "Evolver [%s] 训练集构建完成 (MySQL): training=%d, excluded_today=%d",
-                    self.skill_name, len(training), excluded,
+                    "Evolver [%s] 训练集构建完成 (MySQL): training=%d, excluded_session_date(%s)=%d",
+                    self.skill_name, len(training), exclude_date, excluded,
                 )
                 return training, excluded
             except Exception as e:
@@ -254,7 +275,9 @@ class Evolver:
                             if not entry.get("is_failure", False):
                                 continue
                             scanned += 1
-                            if date_part == target_date:
+                            # 按 session_date 排除（回退到文件名日期）
+                            entry_date = entry.get("session_date", "") or date_part
+                            if entry_date == exclude_date:
                                 excluded += 1
                             else:
                                 all_failures.append(entry)
@@ -264,8 +287,8 @@ class Evolver:
                 logger.warning("Evolver [%s] 训练集读取失败 %s: %s", self.skill_name, jsonl_file, e)
 
         logger.info(
-            "Evolver [%s] 训练集构建完成 (JSONL): total_scanned=%d, training=%d, excluded_today=%d",
-            self.skill_name, scanned, len(all_failures), excluded,
+            "Evolver [%s] 训练集构建完成 (JSONL): total_scanned=%d, training=%d, excluded_session_date(%s)=%d",
+            self.skill_name, scanned, len(all_failures), exclude_date, excluded,
         )
         return all_failures, excluded
 
@@ -351,14 +374,12 @@ class Evolver:
         self,
         min_failure_samples: int = 10,
         dry_run: bool = True,
-        date_str: str | None = None,
     ) -> EvolveProposal | None:
-        """执行一轮进化。
+        """执行一轮进化 — 累计未处理的失败案例。
 
         Args:
             min_failure_samples: 最少失败样本数
             dry_run: True=仅分析不写入，False=自动写入 MySQL
-            date_str: 日期字符串，默认昨天
         """
         mode = self.evolution_mode
         logger.info(
@@ -373,19 +394,22 @@ class Evolver:
             logger.info("Evolver [%s] ai_role=enhancement，不触发进化", self.skill_name)
             return None
 
-        # 2. 读当天 JSONL（仅用于阈值判断）
-        today_failures = self._load_failure_logs(date_str)
-        proposal.failure_count = len(today_failures)
+        # 2. 读累计未处理失败日志
+        state = self._get_evolution_state()
+        since_log_id = state.get("last_processed_log_id", 0)
+        all_failures = self._load_failure_logs_cumulative(since_log_id)
+        proposal.failure_count = len(all_failures)
 
-        if len(today_failures) < min_failure_samples:
+        if len(all_failures) < min_failure_samples:
             logger.info(
-                "Evolver [%s] 失败样本不足 (got=%d, need=%d)，跳过进化",
-                self.skill_name, len(today_failures), min_failure_samples,
+                "Evolver [%s] 累计未处理失败样本不足 (got=%d, need=%d, since_id=%d)，跳过进化",
+                self.skill_name, len(all_failures), min_failure_samples, since_log_id,
             )
             return proposal
 
         # 2.5 构建训练集（历史失败 - 当天）和验证集（Golden set）
-        training_set, excluded_today = self._build_training_set(date_str)
+        today_str = datetime.now(_BEIJING_TZ).strftime("%Y-%m-%d")
+        training_set, excluded_today = self._build_training_set(today_str)
         validation_size = self._get_golden_set_size() if self._version_mgr else 0
         logger.info(
             "Evolver [%s] 训练集=%d 条, 验证集(Golden set)=%d 条, 当天排除=%d 条",
@@ -425,8 +449,10 @@ class Evolver:
             if mode in ("both", "prompt_only"):
                 current_prompt = self._version_mgr.load_raw(self.skill_name, "prompt") or ""
 
+        proposal.version_before = version_before
+
         # 5. DeepSeek 分析（使用训练集）
-        analysis = await self._analyze_failures(training_set if training_set else today_failures, current_rules, current_prompt)
+        analysis = await self._analyze_failures(training_set if training_set else all_failures, current_rules, current_prompt)
         if not analysis:
             logger.warning("Evolver [%s] DeepSeek 分析未产出结果", self.skill_name)
             return proposal
@@ -522,6 +548,19 @@ class Evolver:
                 logger.info("Evolver [%s] 反馈已记录 round=%d outcome=%s", self.skill_name, evolution_round, outcome)
             except Exception as e:
                 logger.warning("Evolver [%s] 反馈记录失败（不影响主流程）: %s", self.skill_name, e)
+
+            proposal.version_after = version_after
+
+            # ── 更新进化追踪状态：记录本批次最大 log id ──
+            try:
+                new_state = {"last_processed_log_id": self._version_mgr.get_max_execution_log_id(self.skill_name)}
+                self._save_evolution_state(new_state)
+                logger.info(
+                    "Evolver [%s] 进化状态已更新: last_processed_log_id=%d",
+                    self.skill_name, new_state["last_processed_log_id"],
+                )
+            except Exception as e:
+                logger.warning("Evolver [%s] 进化状态更新失败: %s", self.skill_name, e)
 
         return proposal
 

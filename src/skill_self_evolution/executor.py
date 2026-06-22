@@ -116,6 +116,11 @@ class SkillExecutor:
         warnings: list[str] = []
 
         data_source_label = "session_dir" if session_dir else ("candidates_path" if candidates_path else "none")
+        # 从 session 目录路径中提取真实日期 (YYYY-MM-DD)
+        import re
+        _sd_match = re.search(r'/(\d{8})/', session_dir) if session_dir else None
+        _session_date = f"{_sd_match.group(1)[:4]}-{_sd_match.group(1)[4:6]}-{_sd_match.group(1)[6:8]}" if _sd_match else ""
+
         logger.info(
             "executor.start",
             skill_name=self.skill_name,
@@ -191,7 +196,7 @@ class SkillExecutor:
                 result={"error": str(e)},
                 warnings=[f"规则阶段异常: {e}"],
             )
-            self._log(effective_trace_id, True, False, candidates_path or session_dir, output, None, None, output, warnings, elapsed)
+            self._log(effective_trace_id, True, False, candidates_path or session_dir, output, None, None, output, warnings, elapsed, session_date=_session_date)
             return output
 
         ai_validation: AiValidationResult | None = None
@@ -206,7 +211,7 @@ class SkillExecutor:
                 rule_output.warnings = warnings
                 elapsed = (time.monotonic() - start_time) * 1000
                 is_failure, no_valid = self._compute_is_failure(rule_output, None, None)
-                self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, None, None, rule_output, warnings, elapsed)
+                self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, None, None, rule_output, warnings, elapsed, session_date=_session_date)
                 return rule_output
 
             try:
@@ -227,7 +232,7 @@ class SkillExecutor:
                     rule_output.ai_validated = False
                     rule_output.warnings = warnings
                     is_failure, no_valid = self._compute_is_failure(rule_output, None, None)
-                    self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, None, None, rule_output, warnings, elapsed)
+                    self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, None, None, rule_output, warnings, elapsed, session_date=_session_date)
                     return rule_output
 
             if ai_validation and ai_validation.result == "不合理":
@@ -236,7 +241,7 @@ class SkillExecutor:
                     warnings.extend(fb_reselect.warnings)
                     elapsed = (time.monotonic() - start_time) * 1000
                     is_failure, no_valid = self._compute_is_failure(rule_output, ai_validation, None)
-                    self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, ai_validation, None, rule_output, warnings, elapsed)
+                    self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, ai_validation, None, rule_output, warnings, elapsed, session_date=_session_date)
                     return rule_output
 
                 try:
@@ -261,7 +266,7 @@ class SkillExecutor:
                         )
                         elapsed = (time.monotonic() - start_time) * 1000
                         is_failure, no_valid = self._compute_is_failure(rule_output, ai_validation, ai_reselection)
-                        self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, ai_validation, ai_reselection, final_output, warnings, elapsed)
+                        self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, ai_validation, ai_reselection, final_output, warnings, elapsed, session_date=_session_date)
                         return final_output
                     else:
                         rule_output.ai_reselected = True
@@ -275,7 +280,7 @@ class SkillExecutor:
             rule_output.warnings = warnings
             elapsed = (time.monotonic() - start_time) * 1000
             is_failure, no_valid = self._compute_is_failure(rule_output, ai_validation, ai_reselection)
-            self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, ai_validation, ai_reselection, rule_output, warnings, elapsed)
+            self._log(effective_trace_id, is_failure, no_valid, data_source, rule_output, ai_validation, ai_reselection, rule_output, warnings, elapsed, session_date=_session_date)
             return rule_output
 
         elif self.ai_role == "enhancement":
@@ -284,7 +289,7 @@ class SkillExecutor:
                 warnings.extend(fb_check.warnings)
                 rule_output.warnings = warnings
                 elapsed = (time.monotonic() - start_time) * 1000
-                self._log(effective_trace_id, False, False, data_source, rule_output, None, None, rule_output, warnings, elapsed)
+                self._log(effective_trace_id, False, False, data_source, rule_output, None, None, rule_output, warnings, elapsed, session_date=_session_date)
                 return rule_output
 
             try:
@@ -300,20 +305,20 @@ class SkillExecutor:
                     warnings=warnings,
                 )
                 elapsed = (time.monotonic() - start_time) * 1000
-                self._log(effective_trace_id, False, False, data_source, rule_output, None, None, final_output, warnings, elapsed)
+                self._log(effective_trace_id, False, False, data_source, rule_output, None, None, final_output, warnings, elapsed, session_date=_session_date)
                 return final_output
             except Exception as e:
                 logger.warning("executor.ai_enhancement_error", skill_name=self.skill_name, error=str(e))
                 rule_output.warnings = warnings
                 elapsed = (time.monotonic() - start_time) * 1000
-                self._log(effective_trace_id, False, False, data_source, rule_output, None, None, rule_output, warnings, elapsed)
+                self._log(effective_trace_id, False, False, data_source, rule_output, None, None, rule_output, warnings, elapsed, session_date=_session_date)
                 return rule_output
 
         else:
             logger.warning("executor.unknown_ai_role", skill_name=self.skill_name, ai_role=self.ai_role)
             rule_output.warnings = warnings
             elapsed = (time.monotonic() - start_time) * 1000
-            self._log(effective_trace_id, False, False, data_source, rule_output, None, None, rule_output, warnings, elapsed)
+            self._log(effective_trace_id, False, False, data_source, rule_output, None, None, rule_output, warnings, elapsed, session_date=_session_date)
             return rule_output
 
     # ── 候选池处理 ──
@@ -555,6 +560,7 @@ class SkillExecutor:
         final_output: SkillOutput,
         warnings: list[str],
         elapsed_ms: float,
+        session_date: str = "",
     ) -> None:
         try:
             log_writer = SkillLogger(self.skill_name, version_mgr=self._version_mgr)
@@ -573,6 +579,7 @@ class SkillExecutor:
                 final_output=final_output.result,
                 warnings=warnings,
                 elapsed_ms=round(elapsed_ms, 1),
+                session_date=session_date,
             )
             logger.info(
                 "executor.jsonl_written",

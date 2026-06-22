@@ -90,12 +90,14 @@ class SkillLogger:
         final_output: dict,
         warnings: list[str],
         elapsed_ms: float,
+        session_date: str = "",
     ) -> None:
         """写入标准执行日志条目（Pydantic 校验后持久化到 MySQL + JSONL）。"""
         entry = LogEntry(
             trace_id=trace_id,
             skill_name=self.skill_name,
             timestamp=_beijing_now().isoformat(),
+            session_date=session_date,
             is_failure=is_failure,
             no_valid_alternative=no_valid_alternative,
             input_summary=input_summary,

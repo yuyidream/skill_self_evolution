@@ -127,7 +127,7 @@ class ConfigVersionManager:
         logger.info("skill_evolution_feedback 表确认存在")
 
     def ensure_execution_log_table(self) -> None:
-        """创建 skill_execution_log 表（幂等）。"""
+        """创建 skill_execution_log 表（幂等），并确保含有 session_date 列。"""
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.execute(
@@ -137,6 +137,7 @@ class ConfigVersionManager:
                     skill_name      VARCHAR(64) NOT NULL,
                     trace_id        VARCHAR(128) NOT NULL DEFAULT '',
                     timestamp       VARCHAR(32) NOT NULL COMMENT 'ISO-8601 北京时间',
+                    session_date    VARCHAR(10) NOT NULL DEFAULT '' COMMENT 'Session 真实日期 YYYY-MM-DD',
                     is_failure      TINYINT(1) NOT NULL DEFAULT 0,
                     no_valid_alternative TINYINT(1) NOT NULL DEFAULT 0,
                     input_summary   LONGTEXT COMMENT '含 session 文件全文（enrich_failure 注入）',
@@ -147,11 +148,20 @@ class ConfigVersionManager:
                     warnings        JSON,
                     elapsed_ms      DOUBLE NOT NULL DEFAULT 0,
                     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    INDEX idx_skill_date (skill_name, timestamp),
-                    INDEX idx_skill_failure (skill_name, is_failure)
+                    INDEX idx_skill_failure (skill_name, is_failure),
+                    INDEX idx_session_date (skill_name, session_date)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """
             )
+            # 兼容旧表：无 session_date 列时自动添加
+            try:
+                cur.execute(
+                    "ALTER TABLE skill_execution_log ADD COLUMN session_date VARCHAR(10) NOT NULL DEFAULT '' "
+                    "COMMENT 'Session 真实日期 YYYY-MM-DD' AFTER timestamp"
+                )
+                logger.info("skill_execution_log 表已补充 session_date 列")
+            except Exception:
+                pass  # 列已存在
         logger.info("skill_execution_log 表确认存在")
 
     def save_execution_log(self, entry: dict) -> int:
@@ -164,14 +174,15 @@ class ConfigVersionManager:
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO skill_execution_log
-                   (skill_name, trace_id, timestamp, is_failure, no_valid_alternative,
+                   (skill_name, trace_id, timestamp, session_date, is_failure, no_valid_alternative,
                     input_summary, rule_output, ai_validation, ai_reselection,
                     final_output, warnings, elapsed_ms)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (
                     entry.get("skill_name", ""),
                     entry.get("trace_id", ""),
                     entry.get("timestamp", ""),
+                    entry.get("session_date", ""),
                     1 if entry.get("is_failure") else 0,
                     1 if entry.get("no_valid_alternative") else 0,
                     _json.dumps(entry.get("input_summary", {}), ensure_ascii=False),
@@ -186,27 +197,29 @@ class ConfigVersionManager:
             log_id = cur.lastrowid
         return log_id
 
-    def load_failure_logs(self, skill_name: str, date_str: str) -> list[dict]:
-        """加载指定日期的失败日志。
+    def load_failure_logs_cumulative(self, skill_name: str, since_log_id: int = 0) -> list[dict]:
+        """加载累计未处理的失败日志（id > since_log_id）。
 
         Returns:
-            日志条目列表（dict 格式，字段名与原 JSONL 一致）
+            日志条目列表（dict 格式，字段名与原 JSONL 一致），含 id 字段用于追踪
         """
         import pymysql.cursors
         conn = self._get_conn()
         with conn.cursor(pymysql.cursors.DictCursor) as cur:
             cur.execute(
                 """SELECT * FROM skill_execution_log
-                   WHERE skill_name = %s AND is_failure = 1 AND timestamp LIKE %s
+                   WHERE skill_name = %s AND is_failure = 1 AND id > %s
                    ORDER BY id""",
-                (skill_name, f"{date_str}%"),
+                (skill_name, since_log_id),
             )
             rows = cur.fetchall()
         return [
             {
+                "id": r.get("id"),
                 "trace_id": r.get("trace_id", ""),
                 "skill_name": r.get("skill_name", ""),
                 "timestamp": r.get("timestamp", ""),
+                "session_date": r.get("session_date", ""),
                 "is_failure": bool(r.get("is_failure")),
                 "no_valid_alternative": bool(r.get("no_valid_alternative")),
                 "input_summary": self._parse_json_field(r.get("input_summary")),
@@ -220,13 +233,26 @@ class ConfigVersionManager:
             for r in rows
         ]
 
+    def get_max_execution_log_id(self, skill_name: str = "") -> int:
+        """获取当前最大执行日志 id（用于进化追踪）。"""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            if skill_name:
+                cur.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM skill_execution_log WHERE skill_name = %s",
+                    (skill_name,),
+                )
+            else:
+                cur.execute("SELECT COALESCE(MAX(id), 0) FROM skill_execution_log")
+            return cur.fetchone()[0]
+
     def load_training_set(
-        self, skill_name: str, exclude_date: str
+        self, skill_name: str, exclude_session_date: str
     ) -> tuple[list[dict], int]:
-        """加载训练集：历史所有 is_failure=1，排除 exclude_date。
+        """加载训练集：历史所有 is_failure=1，按 session_date 排除当前批次。
 
         Returns:
-            (training_entries, excluded_today_count)
+            (training_entries, excluded_count)
         """
         import pymysql.cursors
         conn = self._get_conn()
@@ -239,21 +265,21 @@ class ConfigVersionManager:
             )
             total = cur.fetchone()["cnt"]
 
-            # 训练集：历史失败 - 当天
+            # 训练集：历史失败 - 当天 session_date
             cur.execute(
                 "SELECT * FROM skill_execution_log "
                 "WHERE skill_name = %s AND is_failure = 1 "
-                "AND timestamp NOT LIKE %s "
+                "AND (session_date != %s OR session_date = '') "
                 "ORDER BY id",
-                (skill_name, f"{exclude_date}%"),
+                (skill_name, exclude_session_date),
             )
             training_rows = cur.fetchall()
 
             # 当天排除数
             cur.execute(
                 "SELECT COUNT(*) as cnt FROM skill_execution_log "
-                "WHERE skill_name = %s AND is_failure = 1 AND timestamp LIKE %s",
-                (skill_name, f"{exclude_date}%"),
+                "WHERE skill_name = %s AND is_failure = 1 AND session_date = %s",
+                (skill_name, exclude_session_date),
             )
             excluded = cur.fetchone()["cnt"]
 
@@ -262,6 +288,7 @@ class ConfigVersionManager:
                 "trace_id": r.get("trace_id", ""),
                 "skill_name": r.get("skill_name", ""),
                 "timestamp": r.get("timestamp", ""),
+                "session_date": r.get("session_date", ""),
                 "is_failure": True,
                 "no_valid_alternative": bool(r.get("no_valid_alternative")),
                 "input_summary": self._parse_json_field(r.get("input_summary")),
@@ -276,8 +303,8 @@ class ConfigVersionManager:
         ]
 
         logger.info(
-            "ConfigVersionManager 训练集加载: skill=%s total_failures=%d training=%d excluded_today=%d",
-            skill_name, total, len(training), excluded,
+            "ConfigVersionManager 训练集加载: skill=%s total_failures=%d training=%d excluded_session_date(%s)=%d",
+            skill_name, total, len(training), exclude_session_date, excluded,
         )
         return training, excluded
 

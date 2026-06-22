@@ -77,6 +77,11 @@ class LogEntry(BaseModel):
     trace_id: str = Field(default="")
     skill_name: str = Field(default="")
     timestamp: str = Field(default="")
+    session_date: str = Field(
+        default="",
+        description="Session 真实日期（从 session 目录路径解析的 YYYY-MM-DD），"
+        "用于训练集按真实日期排除（而非日志写入时间）。",
+    )
     is_failure: bool = Field(default=False)
     no_valid_alternative: bool = Field(
         default=False,
@@ -120,6 +125,8 @@ class EvolveProposalModel(BaseModel):
     failure_count: int = Field(default=0)
     training_set_size: int = Field(default=0)
     validation_set_size: int = Field(default=0)
+    version_before: int | None = Field(default=None, description="进化前 rules_config 版本号")
+    version_after: int | None = Field(default=None, description="进化后 rules_config 版本号")
     applied: bool = Field(default=False)
     rolled_back: bool = Field(default=False)
 
