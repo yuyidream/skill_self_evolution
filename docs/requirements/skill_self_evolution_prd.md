@@ -225,6 +225,7 @@ env文件里的 `enable_nickname_evolution` 参数作为开关，只控制管线
 - **训练集 `training_set_nickname_evolution`**（给 Evolver 分析规则缺陷）：历史 `is_failure=true` 中排除当天的新增错误。每个案例通过 JSONL 中的 `session_dir` 定位 session 目录。
 - **验证集 `validation_nickname_evolution`**（给 `benchmark_fn` 验收）：**仅 Golden set**。未经验证的 `is_failure=false` 案例不进入验证集——AI 可能误判（false negative），将 AI 错误判断作为正确基准会污染进化方向。
 
+
 整个流程**不生成中间文件**——规则结果判断AI、Evolver 进化AI、benchmark 均直接读取 session 目录下的原始文件。
 
 两个 AI 角色的数据需求对比：
