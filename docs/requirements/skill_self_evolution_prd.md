@@ -83,6 +83,11 @@
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
+
+
+
+
+
 文字描述
 
 框架有两条并列的上游链路，共同接入 Evolver（离线进化）：
@@ -90,6 +95,31 @@
 **上游1：数据处理规则结果判断**（昵称选择 / 发言人结构化）。
 
 （一）昵称选择模型（规则）的自我进化方案：
+
+
+三组件解耦关系
+skill_self_evolution（开源）          screenshot_vision_algorithm（开源）
+  │                                        │
+  ├── rules_config.yaml ───真理源────      ├── NicknameOcrConfig ← 纯 dataclass
+  │   nickname_thresholds                  │   skip_block_patterns: tuple
+  │   card_binding                         │   cross_band_distance_threshold_px
+  │   skip_patterns                        │   min_confidence...
+  │                                        │
+  └── Evolver 优化↑                        └── _should_skip_block() ← 读 config
+                          ↑
+                    读 yaml，构造 dataclass
+                          │
+                  housekeeping（项目）
+                    run_processor_minimal.py
+                    _default_nickname_ocr_config()
+sva 对 skill_self_evolution 零依赖
+skill_self_evolution 对 sva 零依赖
+housekeeping 是唯一知道两者并存的项目，负责胶水
+其他项目可以直接 NicknameOcrConfig(skip_block_patterns=(...)) 无需 yaml
+Evolver 优化 rules_config.yaml 后，下轮扫描自动生效（无需改 sva 代码）
+
+
+
 
 ### 管线内的规则执行（始终运行，无需开关）
 
@@ -241,9 +271,10 @@ env文件里的 `enable_nickname_evolution` 参数作为开关，只控制管线
 | **数据获取方式** | SkillExecutor 直接读取候选池文本列表 + speaker JSON | 通过 `enrich_failure` 回调全文注入到 JSONL `input_summary` 中，LLM 无需文件系统访问 |
 
 
-#### 每晚进化定时任务 `nickname_evolution`
+#### 进化定时任务 `nickname_evolution`
 
-`nickname_evolution` 是独立的 APScheduler 定时任务（后台常驻，每天晚间执行一次），
+
+`nickname_evolution` 是独立的 APScheduler 定时任务（后台常驻，每天11点和23点执行一次），
 启动时读取 `enable_nickname_evolution` 参数，为 `true` 时才执行进化流程：
 
 Evolver 先构建训练集和验证集，
