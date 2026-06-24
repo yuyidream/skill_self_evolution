@@ -230,7 +230,7 @@ env文件里的 `enable_nickname_evolution` 参数作为开关，只控制管线
 1. 定位 session 目录下的 speaker JSON 文件（格式 `{昵称}_{时间戳}.json`）→ 读取 `md5_spokesperson.speaker_binding_raw`（管线的最终选择）。AI 始终以管线实际输出作为判断对象——Golden label 不替代 AI 输入，仅用于 Evolver benchmark 时的正确性对照。
 2. 读取 `debug_session_derived.json` → 提取所有 `class: "nickname_candidate"` 的 block 的 `text` 字段 → 候选池文本列表。
 3. 调用 `SkillExecutor.run(session_dir, prompt_config)`，
-   将候选池文本 + 管线选中的昵称交给“昵称选择结果判断AI”（当前接入DeepSeek，按 `prompt.yaml` 常识判断）：
+   将候选池文本 + 管线选中的昵称交给“规则选择结果判断AI”（当前接入DeepSeek，按 `prompt.yaml` 常识判断）：
    管线选出的昵称是否正确、合理。
    “规则结果判断AI”仅凭人类常识判断，不看当前规则配置，也不看 bbox / band / customer_metadata 等几何数据。
 
@@ -244,7 +244,7 @@ env文件里的 `enable_nickname_evolution` 参数作为开关，只控制管线
    回调在 `SkillExecutor.run(session_dir=...)` 执行时被调用，读取 `debug_session_derived.json`、
    `speaker JSON`、`customer_metadata.json` 的全文，注入到 JSONL 的 `input_summary` 中。
    这些数据供后续 Evolver LLM 分析几何原因（如 band 归属错误、卡片边界偏差等），
-   而非让"昵称选择结果判断AI"使用。
+   而非让"规则选择结果判断AI"使用。
 
 
 #### Evolver训练集和验证集
