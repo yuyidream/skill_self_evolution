@@ -58,7 +58,7 @@ class SkillExecutor:
         ai_role: str = "correction",
         deepseek_api_key: str = "",
         deepseek_api_base: str = "https://api.deepseek.com/v1",
-        deepseek_model: str = "deepseek-v4-flash",
+        deepseek_model: str = "deepseek-v4-pro",
         enrich_failure: "Callable[[str], dict[str, str]] | None" = None,
         version_mgr: "Any | None" = None,
     ):

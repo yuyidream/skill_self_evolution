@@ -240,11 +240,13 @@ class TestEvolveFlowTrainingGoldenSet:
     def _make_mock_evolver(self, log_dir: Path):
         """构造一个 mock Evolver，跳过 DeepSeek / benchmark / 文件写入。
 
-        load_failure_logs / load_training_set 抛出异常，强制回退 JSONL 路径。
+        load_failure_logs / load_failure_logs_by_date / load_training_set 抛出异常，强制回退 JSONL 路径。
         """
         mgr = MagicMock()
         # 强制 MySQL 失败 → JSONL 回退
         mgr.load_failure_logs.side_effect = Exception("MySQL not available")
+        mgr.load_failure_logs_by_date.side_effect = Exception("MySQL not available")
+        mgr.ensure_execution_log_table.side_effect = Exception("MySQL not available")
         mgr.load_training_set.side_effect = Exception("MySQL not available")
         mgr.get_golden_set_size.return_value = 7
         mgr.get_next_evolution_round.return_value = 3

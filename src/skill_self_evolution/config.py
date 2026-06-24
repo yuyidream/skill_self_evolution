@@ -28,7 +28,7 @@ class DeepSeekEnvConfig(BaseModel):
         default="https://api.deepseek.com/v1",
         description="API ????",
     )
-    model: str = Field(default="deepseek-chat", description="????")
+    model: str = Field(default="deepseek-v4-pro", description="????")
 
 
 class DbConfig(BaseModel):
@@ -50,11 +50,11 @@ def get_deepseek_config(
         return DeepSeekEnvConfig(
             api_key=api_key,
             api_base=api_base,
-            model=model or "deepseek-chat",
+            model=model or "deepseek-v4-pro",
         )
     _ak = api_key or os.getenv("DEEPSEEK_API_KEY", "")
     _ab = api_base or os.getenv("DEEPSEEK_API_BASE", "") or "https://api.deepseek.com/v1"
-    _m = model or os.getenv("DEEPSEEK_MODEL", "") or "deepseek-chat"
+    _m = model or os.getenv("DEEPSEEK_MODEL", "") or "deepseek-v4-pro"
     return DeepSeekEnvConfig(
         api_key=_ak,
         api_base=_ab,

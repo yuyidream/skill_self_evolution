@@ -182,7 +182,7 @@ async def generate_candidate(prompt: str) -> str:
     """通过 harness 调用 DeepSeek 生成代码候选"""
     options = {
         "provider_id": "deepseek",
-        "model_id": os.getenv("DEEPSEEK_MODEL", "deepseek-chat"),
+        "model_id": os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro"),
         "mode": "build",
         "cwd": str(BACKEND),
         "system": SYSTEM_PROMPT,

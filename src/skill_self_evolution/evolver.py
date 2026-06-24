@@ -206,6 +206,50 @@ class Evolver:
         logger.info("Evolver [%s] 从 JSONL 读取 %d 条累计 is_failure 记录", self.skill_name, len(all_failures))
         return all_failures
 
+    def _load_failure_logs(self, date_str: str) -> list[dict]:
+        """加载**指定日期**的失败日志（is_failure=True）。
+
+        Args:
+            date_str: 日期字符串，如 "2026-06-18"，对应 {log_dir}/{date_str}.jsonl
+
+        Returns:
+            list[dict]: 当日所有 is_failure=True 的记录
+        """
+        # 优先 MySQL
+        if self._version_mgr:
+            try:
+                self._version_mgr.ensure_execution_log_table()
+                failures = self._version_mgr.load_failure_logs_by_date(self.skill_name, date_str)
+                logger.info(
+                    "Evolver [%s] 从 MySQL 读取 %d 条 %s is_failure 记录",
+                    self.skill_name, len(failures), date_str,
+                )
+                return failures
+            except Exception as e:
+                logger.warning("Evolver [%s] MySQL 按日期读取失败，回退 JSONL: %s", self.skill_name, e)
+
+        # 回退 JSONL：读取 {date_str}.jsonl
+        jsonl_path = self.log_dir / f"{date_str}.jsonl"
+        failures: list[dict] = []
+        if jsonl_path.exists():
+            try:
+                with open(jsonl_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            entry = json.loads(line)
+                            if entry.get("is_failure", False):
+                                failures.append(entry)
+                        except json.JSONDecodeError:
+                            continue
+            except Exception as e:
+                logger.warning("Evolver [%s] 日志读取失败 %s: %s", self.skill_name, jsonl_path, e)
+
+        logger.info("Evolver [%s] 从 JSONL 读取 %d 条 %s is_failure 记录", self.skill_name, len(failures), date_str)
+        return failures
+
     def _get_evolution_state(self) -> dict:
         """获取进化追踪状态：上次已处理的最大 log id。"""
         state_file = self.log_dir / ".evolve_state.json"
@@ -374,12 +418,15 @@ class Evolver:
         self,
         min_failure_samples: int = 10,
         dry_run: bool = True,
+        date_str: str | None = None,
     ) -> EvolveProposal | None:
         """执行一轮进化 — 累计未处理的失败案例。
 
         Args:
             min_failure_samples: 最少失败样本数
             dry_run: True=仅分析不写入，False=自动写入 MySQL
+            date_str: 指定"今天"日期（YYYY-MM-DD），默认取当前北京时间
+               用于测试中模拟特定日期的进化流程
         """
         mode = self.evolution_mode
         logger.info(
@@ -394,10 +441,14 @@ class Evolver:
             logger.info("Evolver [%s] ai_role=enhancement，不触发进化", self.skill_name)
             return None
 
-        # 2. 读累计未处理失败日志
-        state = self._get_evolution_state()
-        since_log_id = state.get("last_processed_log_id", 0)
-        all_failures = self._load_failure_logs_cumulative(since_log_id)
+        # 2. 读失败日志（测试模式按 date_str 加载当日；生产模式累计加载）
+        since_log_id = 0
+        if date_str:
+            all_failures = self._load_failure_logs(date_str)
+        else:
+            state = self._get_evolution_state()
+            since_log_id = state.get("last_processed_log_id", 0)
+            all_failures = self._load_failure_logs_cumulative(since_log_id)
         proposal.failure_count = len(all_failures)
 
         if len(all_failures) < min_failure_samples:
@@ -408,7 +459,7 @@ class Evolver:
             return proposal
 
         # 2.5 构建训练集（历史失败 - 当天）和验证集（Golden set）
-        today_str = datetime.now(_BEIJING_TZ).strftime("%Y-%m-%d")
+        today_str = date_str if date_str else datetime.now(_BEIJING_TZ).strftime("%Y-%m-%d")
         training_set, excluded_today = self._build_training_set(today_str)
         validation_size = self._get_golden_set_size() if self._version_mgr else 0
         logger.info(
