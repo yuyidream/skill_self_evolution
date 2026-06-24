@@ -378,6 +378,8 @@ class SkillExecutor:
                 continue
             try:
                 data = _json.loads(sf.read_text(encoding="utf-8"))
+                if data.get("other", {}).get("md5_duplicate", False):
+                    continue
                 if isinstance(data, dict):
                     md5_sp = data.get("md5_spokesperson", {})
                     if isinstance(md5_sp, dict):

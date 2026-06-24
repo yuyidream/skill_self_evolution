@@ -96,6 +96,7 @@
 
 （一）昵称选择模型（规则）的自我进化方案：
 
+rules_config.yaml存在mysql数据库，同时项目目录有备份（从数据库读取）
 
 三组件解耦关系
 skill_self_evolution（开源）          screenshot_vision_algorithm（开源）
