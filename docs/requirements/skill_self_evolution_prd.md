@@ -122,6 +122,29 @@ Evolver 优化 rules_config.yaml 后，下轮扫描自动生效（无需改 sva 
 
 
 
+同一套版本文件，一个版本号来源
+                      wx_version_activation 表
+                      active_version = N
+                            │
+        ┌───────────────────┼───────────────────┐
+        ▼                                       ▼
+  Admin 创建新版本                     Evolver 自动进化
+  rules_config_v{N+1}.yaml           rules_config_v{N+1}.yaml
+  set_active_version(N+1)            _sync_evolved_rules_to_version_manager()
+        │                                       │
+        └──────────────┬────────────────────────┘
+                       ▼
+              VersionManager.load_config("nickname_rules_config")
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+        run.py    scan_job.py    benchmark()
+       (扫码生产)  (扫描旁路)    (进化验证)
+
+Admin 面板"创建新版本"和 Evolver "自动进化"都通过同一个 wx_version_activation 表 + rules_config_vN.yaml 文件体系，生产流程实时读取当前激活版本。Evolver 内部的 rules_config.yaml 作为工作文件保留不动（_sync_rules_to_disk 仍写入它），但 3 个生产入口都从 VersionManager 读取。
+
+
+
 ### 管线内的规则执行（始终运行，无需开关）
 
 声明式规则引擎由两部分组成：**`rules_config.yaml`**（规则定义）+ **`rule_runner.py`**（薄执行层）。用于替代 `nickname_ocr_simple.py` 中 `_classify()` 的旧硬编码实现：对每个 OCR text block 逐块分类（`nickname_candidate` / `bubble_text` / `drop`），结构编排层再从候选池中选出最终昵称。
@@ -248,7 +271,7 @@ env文件里的 `enable_nickname_evolution` 参数作为开关，只控制管线
 
 
 #### Evolver训练集和验证集
-由 Evolver 在每晚进化定时任务里构建
+由 Evolver 在每天进化定时任务里构建
 
 **数据源与 Evolver 共用同一 `log_dir`（`/data/skill-logs/{skill_name}/`）。为防止循环自证，错误集拆分为训练集和验证集：**
 
