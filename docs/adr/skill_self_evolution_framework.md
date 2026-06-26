@@ -48,16 +48,19 @@ backend/config/services/skill/{skill_name}/
 ├── evolve.toml                 ← 进化权限配置（Git，含 ai_role）
 ├── evolve_prompt.yaml          ← EvoSkill 分析 prompt（可选，覆盖框架默认）
 │
-MySQL: skill_config 表
-├── rules_config.yaml           ← 阈值/黑名单/正则模式（热加载）
-└── prompt.yaml                 ← DeepSeek 提示词模板（热加载）
+VersionManager + wx_version_activation（业务项目 housekeeping 提供）
+├── rules_config_vN.yaml        ← 阈值/黑名单/正则模式（VersionManager 激活版本）
+├── rules_config.yaml           ← Evolver 工作文件（写入后同步为 v{N+1}）
+└── prompt_vN.yaml / prompt.yaml ← DeepSeek 提示词模板
 ```
+
+配置版本由业务项目 VersionManager 管理；框架 `ConfigVersionManager` 仅保留 `skill_execution_log` 与 `skill_evolution_feedback`。
 
 ### `run.py` 强制接口
 
 ```python
 def execute(input_data: SkillInput, config: dict) -> SkillOutput:
-    """运行时调用。config 来自 MySQL rules_config.yaml"""
+    """运行时调用。config 来自 VersionManager 激活的 rules_config_vN.yaml"""
 
 def benchmark(executor) -> tuple[int, int, list]:
     """进化时调用。无数据时返回 (0, 0, [])"""
@@ -225,51 +228,69 @@ ai_fallback:
 
 ---
 
-### 九、MySQL 表结构
+### 九、MySQL 表结构（框架侧）
+
+rules_config / prompt 版本由业务项目 **VersionManager + `wx_version_activation` + `rules_config_vN.yaml`** 管理（见 PRD §同一套版本文件）。
 
 ```sql
--- 主配置表
-CREATE TABLE skill_config (
-    skill_name   VARCHAR(128) NOT NULL COMMENT 'Skill 名称',
-    config_type  ENUM('rules_config','prompt') NOT NULL COMMENT '配置类型',
-    content      MEDIUMTEXT NOT NULL COMMENT 'YAML 字符串',
-    version      INT NOT NULL DEFAULT 1 COMMENT '版本号，每次更新递增',
-    updated_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    PRIMARY KEY (skill_name, config_type)
+-- 执行日志（每次 AI 判断一行）
+CREATE TABLE skill_execution_log (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    skill_name      VARCHAR(64) NOT NULL,
+    trace_id        VARCHAR(128) NOT NULL DEFAULT '',
+    timestamp       VARCHAR(32) NOT NULL,
+    session_date    VARCHAR(10) NOT NULL DEFAULT '',
+    is_failure      TINYINT(1) NOT NULL DEFAULT 0,
+    no_valid_alternative TINYINT(1) NOT NULL DEFAULT 0,
+    input_summary   LONGTEXT,
+    rule_output     JSON,
+    ai_validation   JSON,
+    ai_reselection  JSON,
+    final_output    JSON,
+    warnings        JSON,
+    elapsed_ms      DOUBLE NOT NULL DEFAULT 0,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_skill_failure (skill_name, is_failure),
+    INDEX idx_session_date (skill_name, session_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- 配置历史（每次更新前归档旧版本，支持回滚）
-CREATE TABLE skill_config_history (
-    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
-    skill_name   VARCHAR(128) NOT NULL,
-    config_type  ENUM('rules_config','prompt') NOT NULL,
-    content      MEDIUMTEXT NOT NULL,
-    version      INT NOT NULL,
-    archived_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_skill_version (skill_name, config_type, version)
+-- 进化反馈历史（每轮 Evolver 一行）
+CREATE TABLE skill_evolution_feedback (
+    id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+    skill_name      VARCHAR(128) NOT NULL,
+    evolution_round INT NOT NULL,
+    outcome         ENUM('improved','discarded','rolled_back') NOT NULL,
+    proposal_summary TEXT,
+    benchmark_before_pass INT DEFAULT 0,
+    benchmark_before_total INT DEFAULT 0,
+    benchmark_after_pass INT DEFAULT 0,
+    benchmark_after_total INT DEFAULT 0,
+    failure_count   INT DEFAULT 0,
+    analysis_raw    TEXT,
+    version_before  INT COMMENT 'VersionManager 激活版本号（进化前）',
+    version_after   INT COMMENT 'VersionManager 激活版本号（进化后）',
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_skill_round (skill_name, evolution_round)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 ```
 
 ---
 
-### 十、框架内置版本管理
+### 十、框架 MySQL 存储（ConfigVersionManager）
 
 ```python
-# skill_engine/config_loader.py
+# skill_self_evolution/config_loader.py
 
 class ConfigVersionManager:
     """
-    框架内置简单版本管理：version 递增 + 历史归档。
-    housekeeping 项目的 VersionManager 作为可选适配器实现同一接口。
+    框架 MySQL 存储：skill_execution_log + skill_evolution_feedback。
+    rules_config 版本读写由业务项目 VersionManager 回调注入 Evolver（on_rules_applied / on_rules_rollback）。
     """
-    def load(self, skill_name: str, config_type: str) -> dict | None:
-        """从 MySQL 加载当前激活版本，返回解析后的 dict"""
-
-    def save(self, skill_name: str, config_type: str, content: str):
-        """写入新版本：先归档旧版本到 skill_config_history，再更新主表 version+1"""
-
-    def rollback(self, skill_name: str, config_type: str, target_version: int):
-        """回滚到指定版本"""
+    def ensure_evolution_tables(self) -> None: ...
+    def save_execution_log(self, entry: dict) -> int: ...
+    def load_failure_logs_cumulative(self, skill_name, since_log_id=0) -> list[dict]: ...
+    def save_feedback(self, ...) -> int: ...
+    def load_feedback_history(self, skill_name, max_rounds=5) -> list[dict]: ...
 ```
 
 ---
@@ -442,8 +463,7 @@ skill-engine (pip, 纯框架)
     ├── 跑 benchmark()
     ├── DeepSeek 分析失败模式（优先 Skill 自定义 evolve_prompt.yaml，否则用框架默认）
     ├── 生成 YAML 优化提案
-    └── 按 evolve.toml 权限 → 自动写 MySQL 或发 PR
-        └── 写入前归档旧版本到 skill_config_history
+    └── 按 evolve.toml 权限 → 写工作文件 + VersionManager 版本化（on_rules_applied）
 ```
 
 ---
@@ -460,7 +480,7 @@ ai_role = "correction"        # "correction"（纠错项）或 "enhancement"（�
 [evolve.auto_modify]
 skill_md     = false    # 知识文档，发 PR
 scripts      = false    # 确定性逻辑，发 PR
-rules_config = true     # 阈值/黑名单/正则，自动写 MySQL
+rules_config = true     # 阈值/黑名单/正则，自动写工作文件 + VersionManager 版本化
 prompt       = true     # 模板措辞，自动写 MySQL
 
 [evolve.auto_modify.rules_config]
@@ -633,44 +653,47 @@ Evolver.evolve(skill_name)
   ├─ _load_failure_logs() → 读 JSONL, 筛选 is_failure=true
   ├─ _run_benchmark() → 进化前基线
   │
-  ├─ ConfigVersionManager.load_raw(rules_config)  → {{current_rules_config}}  ← rules_config 介入
-  ├─ ConfigVersionManager.load_raw(prompt)        → {{current_prompt}}        ← prompt 介入
+  ├─ _load_rules_yaml_from_disk()  → {{current_rules_config}}  ← 工作文件 rules_config.yaml
+  ├─ _load_prompt_yaml_from_disk() → {{current_prompt}}         ← 工作文件 prompt.yaml（可选）
   │
   ├─ _analyze_failures()
   │   └─ DeepSeek.chat_json()
   │       ├─ system: evolve_prompt.yaml → system
   │       └─ user:   evolve_prompt.yaml → analyze_template
   │           ├─ {{skill_name}}          ← 固定注入
-  │           ├─ {{current_rules_config}} ← rules_config 当前值
-  │           ├─ {{current_prompt}}       ← prompt 当前值
-  │           └─ {{failure_logs}}         ← JSONL 中 is_failure=true 的记录（≤20 条）
+  │           ├─ {{feedback_history}}    ← skill_evolution_feedback 最近 N 轮
+  │           ├─ {{current_rules_config}} ← 磁盘工作文件
+  │           ├─ {{current_prompt}}       ← 磁盘工作文件
+  │           └─ {{failure_logs}}         ← skill_execution_log / JSONL（≤20 条）
   │       → 输出 JSON: {"rules_changes": {...}, "prompt_changes": {...}}
   │
   ├─ 按 evolve.toml 权限：
-  │   ├─ rules_config → ConfigVersionManager.save() 写入 MySQL（写入前归档到 skill_config_history）
-  │   └─ prompt       → ConfigVersionManager.save() 写入 MySQL
+  │   ├─ rules_config → _sync_rules_to_disk() → on_rules_applied() → rules_config_v{N+1}.yaml + VersionManager 激活
+  │   └─ prompt       → _sync_prompt_to_disk()（工作文件；prompt 版本化由业务项目扩展）
   │
-  └─ benchmark 安全网：重跑 benchmark → 退化则 ConfigVersionManager.rollback() 自动回滚
+  └─ benchmark 安全网：退化则恢复工作文件 + on_rules_rollback() → VersionManager.rollback()
 ```
 
 **关键点**：
 
 - `skill.md` 虽然被 `SkillLoader` 加载到 `SkillModule.skill_md`，但当前 `Evolver._analyze_failures()` **未将其注入进化 prompt**。这是一个预留字段——未来可在 `evolve_prompt.yaml` 的 `analyze_template` 中增加 `{{skill_md}}` 占位符实现注入。
-- `rules_config` 和 `prompt` 在进化链路中是**只读引用**（注入 prompt 供 DeepSeek 分析），写入由 `ConfigVersionManager.save()` 执行。
+- `rules_config` 和 `prompt` 在进化链路中从**磁盘工作文件**读取（与 VersionManager 激活版本保持一致）。
+- 写入 rules 时：Evolver 更新工作文件 → 调用方 `on_rules_applied` 创建 `rules_config_v{N+1}.yaml` 并激活（housekeeping `VersionManager`）。
 - `run.py` 在进化链路中通过 `benchmark()` 验证变更效果。
 
-#### 19.4 存储策略（当前实现 vs 目标）
+#### 19.4 存储策略
 
-| 资产 | 当前存储 | 当前加载方式 | 目标存储（MySQL 热加载） |
-|------|---------|-------------|------------------------|
-| `scripts/run.py` | Git 磁盘 | importlib 动态导入 | 保持不变（逻辑代码） |
-| `skill.md` | Git 磁盘 | 直接读文件 | 保持不变（知识文档） |
-| `rules_config.yaml` | Git 磁盘（`skill/{name}/rules_config.yaml`） | 调用方读取后传入 executor | MySQL `skill_config` 表（`config_type='rules_config'`） |
-| `prompt.yaml` | Git 磁盘（`skill/{name}/prompt.yaml`） | 调用方读取后传入 executor | MySQL `skill_config` 表（`config_type='prompt'`） |
-| `evolve.toml` | Git 磁盘 | SkillLoader 内建 TOML 解析 | 保持不变（权限与代码强相关） |
-| `evolve_prompt.yaml` | Git 磁盘（优先 Skill 自定义，降级框架默认） | SkillLoader 加载到 SkillModule | 保持不变或可迁 MySQL |
-
-> **注意**：当前 `rules_config.yaml` 和 `prompt.yaml` 均以磁盘文件形式加载，`SkillExecutor.run()` 未内置 MySQL 读取逻辑——由调用方负责加载后传入。`Evolver` 则通过 `ConfigVersionManager` 直连 MySQL 读写。
+| 资产 | 存储 | 加载方式 |
+|------|------|---------|
+| `scripts/run.py` | Git 磁盘 | importlib 动态导入 |
+| `skill.md` | Git 磁盘 | 直接读文件 |
+| `rules_config.yaml` | 磁盘工作文件 | Evolver 读写；生产读 VersionManager 激活的 `rules_config_vN.yaml` |
+| `rules_config_vN.yaml` | 磁盘版本文件 + `wx_version_activation` | `VersionManager.load_config("nickname_rules_config")` |
+| `prompt.yaml` / `prompt_vN.yaml` | 同上（prompt 版本化待业务扩展） | scan_job / executor 读 VersionManager |
+| `evolve.toml` | Git 磁盘 | SkillLoader |
+| `evolve_prompt.yaml` | Git 磁盘 | SkillLoader → Evolver 分析 prompt |
+| 执行日志 | MySQL `skill_execution_log` + JSONL 副存储 | ConfigVersionManager |
+| 进化反馈 | MySQL `skill_evolution_feedback` | ConfigVersionManager |
 
 ---
 
@@ -709,8 +732,8 @@ Evolver.evolve(skill_name)
 |------|------|------|
 | 2.1 | 创建 `skill/nickname-selector/` 目录 + `skill.md` + `evolve.toml`（`ai_role = "correction"`） | 知识文档 + 权限配置 |
 | 2.2 | 编写 `scripts/run.py`：规则 + AI 常识判断 + candidate 重选 | Skill A 实现 |
-| 2.3 | 编写 `rules_config.yaml` → 写入 MySQL | 规则配置 |
-| 2.4 | 编写 `prompt.yaml`（validate + reselect）→ 写入 MySQL | Prompt 配置 |
+| 2.3 | 编写 `rules_config.yaml` → 提交 Git / VersionManager 版本化 | 规则配置 |
+| 2.4 | 编写 `prompt.yaml`（validate + reselect）→ 提交 Git / VersionManager | Prompt 配置 |
 | 2.5 | 创建 `evolve_prompt.yaml`（可选） | 权限配置 |
 | 2.6 | 集成测试：5 个已知 session 验证昵称结果 | 验证通过 |
 
@@ -720,8 +743,8 @@ Evolver.evolve(skill_name)
 |------|------|------|
 | 3.1 | 创建 `skill/speaker-structurer/` 目录 + `skill.md` + `evolve.toml`（`ai_role = "correction"`） | 知识文档 + 权限配置 |
 | 3.2 | 编写 `scripts/run.py`：正则拆分 + AI 常识判断 + 原文重提取 | Skill C 实现 |
-| 3.3 | 编写 `rules_config.yaml` → 写入 MySQL | 规则配置 |
-| 3.4 | 编写 `prompt.yaml`（validate + reselect）→ 写入 MySQL | Prompt 配置 |
+| 3.3 | 编写 `rules_config.yaml` → 提交 Git / VersionManager 版本化 | 规则配置 |
+| 3.4 | 编写 `prompt.yaml`（validate + reselect）→ 提交 Git / VersionManager | Prompt 配置 |
 | 3.5 | 创建 `evolve_prompt.yaml`（可选） | 权限配置 |
 | 3.6 | 集成测试：5 个发言人 JSON 验证拆分结果 | 验证通过 |
 
@@ -730,7 +753,7 @@ Evolver.evolve(skill_name)
 | 步骤 | 任务 | 产出 |
 |------|------|------|
 | 4.1 | `evolver.py`：读 JSONL（`is_failure=true`，min 10 条）→ DeepSeek 分析 → 生成 YAML 提案 | Evolver 类 |
-| 4.2 | 按 `evolve.toml` 自动写 MySQL（写入前归档到 `skill_config_history`）或生成 PR | 自动生效 / 人工审核 |
+| 4.2 | 按 `evolve.toml` 写工作文件 + VersionManager 版本化（`on_rules_applied`）或生成 PR | 自动生效 / 人工审核 |
 | 4.3 | 进化 dry-run 验证：跑 benchmark 确认不退化 | 安全网 |
 
 ### 阶段 5：验收
@@ -741,7 +764,7 @@ Evolver.evolve(skill_name)
 | 5.2 | AI 兜底命中率统计（验证 + 重选） | 数据报告 |
 | 5.3 | 降级测试：断 DeepSeek API → 链路不崩 | 降级通过 |
 | 5.4 | trace_id 可追踪：任意日志反查完整链路 | 链路通过 |
-| 5.5 | 配置回滚：从 `skill_config_history` 回滚到历史版本 | 回滚通过 |
+| 5.5 | 配置回滚：benchmark 退化 → 恢复工作文件 + `VersionManager.rollback()` | 回滚通过 |
 | 5.6 | EvoSkill 闭环：输入 10 条 `is_failure=true` 日志 → 产出 ≥1 条有效 YAML 提案 | 闭环通过 |
 | 5.7 | benchmark 安全网：错误 YAML 提案注入 → benchmark 不通过 → 自动回滚 | 安全网通过 |
 | **5.8** | **提取 `AiAssistedExecutor` 基类**（三个 `run.py` 写完后，抽取通用「验证+重选」流程） | 框架层抽象 |
@@ -775,8 +798,8 @@ Evolver.evolve(skill_name)
 | `is_failure` 分 ai_role 正确 | `correction` 角色 AI 不合理标记 true；`enhancement` 角色始终 false |
 | 最小样本量 | is_failure < 10 时正确跳过进化 |
 | evolve_prompt 优先级 | Skill 自定义优先，框架默认降级 |
-| 配置历史 | `skill_config_history` 表含每次变更归档 |
-| 配置回滚 | 从 history 表回滚到任意历史版本 |
+| 配置历史 | 磁盘 `rules_config_v1…vN.yaml` + `wx_version_activation`；`skill_evolution_feedback` 记录每轮 outcome |
+| 配置回滚 | VersionManager.rollback() + Evolver 恢复工作文件 |
 | EvoSkill 闭环 | 输入 10 条 `is_failure=true` 日志 → 产出 ≥1 条有效 YAML 提案 |
 | benchmark 安全网 | 错误 YAML 提案注入 → benchmark 不通过 → 自动回滚 |
 | `AiAssistedExecutor` 提取 | 三个 `run.py` 的共通模式抽象为框架基类 |

@@ -19,6 +19,7 @@ Evolver 离线进化器 — 读 JSONL 日志 → DeepSeek 分析失败模式 →
 """
 
 import json
+import re
 from skill_self_evolution.logging import get_logger
 
 logger = get_logger(__name__)
@@ -120,8 +121,12 @@ class Evolver:
         evolve_prompt_yaml: dict[str, Any] | None = None,
         log_dir: Path | None = None,
         rules_config_disk_path: Path | None = None,
+        prompt_config_disk_path: Path | None = None,
         deepseek: DeepSeekClient | None = None,
         version_mgr=None,
+        get_rules_version: Callable[[], str | int | None] | None = None,
+        on_rules_applied: Callable[[str], str | int | None] | None = None,
+        on_rules_rollback: Callable[[], None] | None = None,
         feedback_max_rounds: int = 5,
     ):
         """
@@ -134,9 +139,13 @@ class Evolver:
             evolve_toml: evolve.toml 解析后的 dict（含 auto_modify / guard）
             evolve_prompt_yaml: AI 分析用的提示词模板 dict
             log_dir: JSONL 日志目录（默认从 skill_name 推导）
-            rules_config_disk_path: rules_config.yaml 磁盘路径（用于同步）
+            rules_config_disk_path: rules_config.yaml 工作文件路径（Evolver 读/写）
+            prompt_config_disk_path: prompt.yaml 工作文件路径（可选）
             deepseek: DeepSeek 客户端
-            version_mgr: ConfigVersionManager（MySQL 读写）
+            version_mgr: ConfigVersionManager（执行日志 + 反馈历史）
+            get_rules_version: 读取当前激活 rules 版本号（业务 VersionManager）
+            on_rules_applied: benchmark 通过后创建 rules_config_v{N+1} 并激活
+            on_rules_rollback: benchmark 退化时回滚 VersionManager 激活版本
             feedback_max_rounds: 注入到分析 prompt 的历史反馈轮数（默认 5）
         """
         self.skill_name = skill_name
@@ -156,8 +165,12 @@ class Evolver:
         self.evolve_prompt_yaml = evolve_prompt_yaml or {}
         self._log_dir = Path(log_dir) if log_dir else None
         self._rules_disk_path = rules_config_disk_path
+        self._prompt_disk_path = prompt_config_disk_path
         self._deepseek = deepseek
         self._version_mgr = version_mgr
+        self._get_rules_version = get_rules_version
+        self._on_rules_applied = on_rules_applied
+        self._on_rules_rollback = on_rules_rollback
 
     @property
     def log_dir(self) -> Path:
@@ -487,18 +500,9 @@ class Evolver:
         )
 
         # 4. 加载当前配置（受 evolution_mode 控制）
-        current_rules = ""
-        current_prompt = ""
-        version_before = None
-        if self._version_mgr:
-            if mode in ("both", "rules_only"):
-                current_rules = self._version_mgr.load_raw(self.skill_name, "rules_config") or ""
-                try:
-                    version_before = self._version_mgr.load_version(self.skill_name, "rules_config")
-                except Exception:
-                    pass
-            if mode in ("both", "prompt_only"):
-                current_prompt = self._version_mgr.load_raw(self.skill_name, "prompt") or ""
+        current_rules = self._load_rules_yaml_from_disk()
+        current_prompt = self._load_prompt_yaml_from_disk()
+        version_before = self._resolve_rules_version_before()
 
         proposal.version_before = version_before
 
@@ -528,27 +532,31 @@ class Evolver:
             proposal.prompt_text = self._apply_prompt_changes(current_prompt, proposal.prompt_changes)
 
         # 7. 写入
-        if not dry_run and self._version_mgr:
+        if not dry_run:
             guard = self.evolve_toml.get("evolve", {}).get("guard", {})
             require_bench = guard.get("require_benchmark_pass", True)
 
             applied = True
             version_after = version_before
+            backup_rules = current_rules
             if proposal.rules_text and auto_cfg.get("rules_config", False) and mode in ("both", "rules_only"):
                 proposal.rules_text, lint_errors = lint_and_fix_yaml(proposal.rules_text)
                 if lint_errors:
                     logger.warning("Evolver [%s] rules_config lint issues: %s", self.skill_name, lint_errors)
-                new_ver = self._version_mgr.save(self.skill_name, "rules_config", proposal.rules_text)
-                if new_ver:
-                    version_after = new_ver
                 self._sync_rules_to_disk(proposal.rules_text)
-                logger.info("Evolver [%s] rules_config 已写入 MySQL + 同步到磁盘", self.skill_name)
+                if self._on_rules_applied:
+                    try:
+                        new_ver = self._on_rules_applied(proposal.rules_text)
+                        version_after = self._parse_version_label(new_ver) or version_after
+                    except Exception as e:
+                        logger.warning("Evolver [%s] on_rules_applied 失败: %s", self.skill_name, e)
+                logger.info("Evolver [%s] rules_config 已写入工作文件", self.skill_name)
             if proposal.prompt_text and auto_cfg.get("prompt", False) and mode in ("both", "prompt_only"):
                 proposal.prompt_text, lint_errors = lint_and_fix_yaml(proposal.prompt_text)
                 if lint_errors:
                     logger.warning("Evolver [%s] prompt lint issues: %s", self.skill_name, lint_errors)
-                self._version_mgr.save(self.skill_name, "prompt", proposal.prompt_text)
-                logger.info("Evolver [%s] prompt 已写入 MySQL", self.skill_name)
+                self._sync_prompt_to_disk(proposal.prompt_text)
+                logger.info("Evolver [%s] prompt 已写入工作文件", self.skill_name)
 
             # 8. benchmark 安全网
             if require_bench and (proposal.rules_text or proposal.prompt_text):
@@ -566,12 +574,14 @@ class Evolver:
                         pass_after, proposal.benchmark_after[1],
                     )
                     if proposal.rules_text and auto_cfg.get("rules_config", False) and mode in ("both", "rules_only"):
-                        self._version_mgr.rollback(self.skill_name, "rules_config", 0)
-                        restored = self._version_mgr.load_raw(self.skill_name, "rules_config")
-                        if restored:
-                            self._sync_rules_to_disk(restored)
+                        self._sync_rules_to_disk(backup_rules)
+                        if self._on_rules_rollback:
+                            try:
+                                self._on_rules_rollback()
+                            except Exception as e:
+                                logger.warning("Evolver [%s] on_rules_rollback 失败: %s", self.skill_name, e)
                     if proposal.prompt_text and auto_cfg.get("prompt", False) and mode in ("both", "prompt_only"):
-                        self._version_mgr.rollback(self.skill_name, "prompt", 0)
+                        pass
                     proposal.rolled_back = True
                     proposal.applied = False
                 else:
@@ -581,39 +591,98 @@ class Evolver:
 
             # ── 记录反馈历史 ──
             outcome = "rolled_back" if proposal.rolled_back else ("improved" if proposal.applied else "discarded")
-            try:
-                self._version_mgr.save_feedback(
-                    skill_name=self.skill_name,
-                    evolution_round=evolution_round,
-                    outcome=outcome,
-                    proposal_summary=self._build_proposal_summary(proposal),
-                    benchmark_before_pass=proposal.benchmark_before[0],
-                    benchmark_before_total=proposal.benchmark_before[1],
-                    benchmark_after_pass=proposal.benchmark_after[0] if proposal.benchmark_after else 0,
-                    benchmark_after_total=proposal.benchmark_after[1] if proposal.benchmark_after else 0,
-                    failure_count=proposal.failure_count,
-                    analysis_raw=proposal.analysis_raw,
-                    version_before=version_before,
-                    version_after=version_after,
-                )
-                logger.info("Evolver [%s] 反馈已记录 round=%d outcome=%s", self.skill_name, evolution_round, outcome)
-            except Exception as e:
-                logger.warning("Evolver [%s] 反馈记录失败（不影响主流程）: %s", self.skill_name, e)
+            if self._version_mgr:
+                try:
+                    self._version_mgr.ensure_feedback_table()
+                except Exception as e:
+                    logger.debug("Evolver [%s] 反馈表创建跳过: %s", self.skill_name, e)
+                try:
+                    self._version_mgr.save_feedback(
+                        skill_name=self.skill_name,
+                        evolution_round=evolution_round,
+                        outcome=outcome,
+                        proposal_summary=self._build_proposal_summary(proposal),
+                        benchmark_before_pass=proposal.benchmark_before[0],
+                        benchmark_before_total=proposal.benchmark_before[1],
+                        benchmark_after_pass=proposal.benchmark_after[0] if proposal.benchmark_after else 0,
+                        benchmark_after_total=proposal.benchmark_after[1] if proposal.benchmark_after else 0,
+                        failure_count=proposal.failure_count,
+                        analysis_raw=proposal.analysis_raw,
+                        version_before=version_before,
+                        version_after=version_after,
+                    )
+                    logger.info("Evolver [%s] 反馈已记录 round=%d outcome=%s", self.skill_name, evolution_round, outcome)
+                except Exception as e:
+                    logger.warning("Evolver [%s] 反馈记录失败（不影响主流程）: %s", self.skill_name, e)
 
             proposal.version_after = version_after
 
             # ── 更新进化追踪状态：记录本批次最大 log id ──
-            try:
-                new_state = {"last_processed_log_id": self._version_mgr.get_max_execution_log_id(self.skill_name)}
-                self._save_evolution_state(new_state)
-                logger.info(
-                    "Evolver [%s] 进化状态已更新: last_processed_log_id=%d",
-                    self.skill_name, new_state["last_processed_log_id"],
-                )
-            except Exception as e:
-                logger.warning("Evolver [%s] 进化状态更新失败: %s", self.skill_name, e)
+            if self._version_mgr:
+                try:
+                    new_state = {"last_processed_log_id": self._version_mgr.get_max_execution_log_id(self.skill_name)}
+                    self._save_evolution_state(new_state)
+                    logger.info(
+                        "Evolver [%s] 进化状态已更新: last_processed_log_id=%d",
+                        self.skill_name, new_state["last_processed_log_id"],
+                    )
+                except Exception as e:
+                    logger.warning("Evolver [%s] 进化状态更新失败: %s", self.skill_name, e)
 
         return proposal
+
+    def _load_rules_yaml_from_disk(self) -> str:
+        if not self._rules_disk_path:
+            return ""
+        path = Path(self._rules_disk_path)
+        if not path.exists():
+            return ""
+        try:
+            return path.read_text(encoding="utf-8")
+        except Exception as e:
+            logger.warning("Evolver [%s] 读取 rules_config 失败: %s", self.skill_name, e)
+            return ""
+
+    def _load_prompt_yaml_from_disk(self) -> str:
+        if not self._prompt_disk_path:
+            return ""
+        path = Path(self._prompt_disk_path)
+        if not path.exists():
+            return ""
+        try:
+            return path.read_text(encoding="utf-8")
+        except Exception as e:
+            logger.warning("Evolver [%s] 读取 prompt 失败: %s", self.skill_name, e)
+            return ""
+
+    def _resolve_rules_version_before(self) -> int | None:
+        if not self._get_rules_version:
+            return None
+        try:
+            return self._parse_version_label(self._get_rules_version())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _parse_version_label(label: str | int | None) -> int | None:
+        if label is None:
+            return None
+        if isinstance(label, int):
+            return label
+        nums = re.findall(r"\d+", str(label))
+        return int(nums[-1]) if nums else None
+
+    def _sync_prompt_to_disk(self, yaml_content: str) -> None:
+        if not self._prompt_disk_path:
+            logger.info("Evolver [%s] 未配置 prompt_config_disk_path，跳过磁盘同步", self.skill_name)
+            return
+        disk_path = Path(self._prompt_disk_path)
+        try:
+            disk_path.parent.mkdir(parents=True, exist_ok=True)
+            disk_path.write_text(yaml_content, encoding="utf-8")
+            logger.info("Evolver [%s] prompt 已同步到磁盘: %s", self.skill_name, disk_path)
+        except Exception as e:
+            logger.warning("Evolver [%s] prompt 磁盘同步失败: %s", self.skill_name, e)
 
     def _sync_rules_to_disk(self, yaml_content: str) -> None:
         if not self._rules_disk_path:

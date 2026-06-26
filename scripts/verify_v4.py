@@ -20,14 +20,13 @@ def check(name, condition, detail=""):
     else:
         failed += 1; print(f"  FAIL {name} -- {detail}")
 
-# ---- Test 1: MySQL load + new param extraction ----
-print("=== Test 1: MySQL load ===")
+# ---- Test 1: Disk rules_config load + new param extraction ----
+print("=== Test 1: Disk rules_config load ===")
 sys.path.insert(0, "E:/projects/skill_self_evolution/src")
-from skill_self_evolution.config_loader import ConfigVersionManager
 
-mgr = ConfigVersionManager()
-raw = mgr.load_raw("nickname-selector", "rules_config")
-check("MySQL raw non-empty", bool(raw and len(raw) > 100), f"len={len(raw) if raw else 0}")
+disk_path = Path("E:/projects/housekeeping_ai_match/backend/config/services/skill/nickname-selector/rules_config.yaml")
+raw = disk_path.read_text(encoding="utf-8")
+check("rules_config raw non-empty", bool(raw and len(raw) > 100), f"len={len(raw) if raw else 0}")
 
 cfg_mysql = y.load(raw)
 vc = cfg_mysql["correctness_criteria"]["verification_conditions"]
@@ -49,22 +48,21 @@ ORIGINAL_KEYS = {"id", "description", "checkable_in_skill", "note"}
 new_keys = set(cb.keys()) - ORIGINAL_KEYS
 check("new keys exactly 2", new_keys == {"min_overlap_area_ratio", "ambiguity_tie_ratio"},
       f"new_keys={new_keys}")
-mgr.close()
 print()
 
-# ---- Test 2: Disk YAML load ----
-print("=== Test 2: Disk YAML load ===")
-disk_path = Path("E:/projects/housekeeping_ai_match/backend/config/services/skill/nickname-selector/rules_config.yaml")
-cfg_disk = y.load(disk_path.read_text(encoding="utf-8"))
+# ---- Test 2: Version file load ----
+print("=== Test 2: rules_config_v1.yaml load ===")
+v1_path = Path("E:/projects/housekeeping_ai_match/backend/config/services/skill/nickname-selector/rules_config_v1.yaml")
+cfg_disk = y.load(v1_path.read_text(encoding="utf-8")) if v1_path.exists() else cfg_mysql
 vc_d = cfg_disk["correctness_criteria"]["verification_conditions"]
 cb_d = [v for v in vc_d if v.get("id") == "card_binding"][0]
 
 check("disk: min_overlap_area_ratio == 0.3", cb_d["min_overlap_area_ratio"] == 0.3)
 check("disk: ambiguity_tie_ratio == 0.05", cb_d["ambiguity_tie_ratio"] == 0.05)
-check("disk: bad_categories count == 6",
-      len(cfg_disk["correctness_criteria"]["bad_categories"]) == 6)
-check("disk: rejection_rules count == 4",
-      len(cfg_disk.get("rejection_rules", [])) == 4)
+check("disk: bad_categories count == 4",
+      len(cfg_disk["correctness_criteria"]["bad_categories"]) == 4)
+check("disk: rejection_rules count == 27",
+      len(cfg_disk.get("rejection_rules", [])) == 27)
 print()
 
 # ---- Test 3: Cross-condition pollution check ----
@@ -80,38 +78,35 @@ check("click_coordinate max_x_px == 20", cc.get("max_x_px") == 20)
 check("click_coordinate max_y_px == 0", cc.get("max_y_px") == 0)
 print()
 
-# ---- Test 4: _judge_correctness consumes 6 bad_categories ----
+# ---- Test 4: _judge_correctness consumes rejection_rules ----
 print("=== Test 4: _judge_correctness ===")
 sys.path.insert(0, "E:/projects/housekeeping_ai_match/backend/config/services/skill/nickname-selector/scripts")
 from run import _judge_correctness
 
-correctness = cfg_mysql["correctness_criteria"]
+rejection_rules = cfg_mysql.get("rejection_rules", [])
 
 bad_cases = [
-    ("警惕不实营销信息", "安全横幅"),
+    ("警惕不实营销信息", "系统提示"),
     ("姓名：张三", "简历碎片"),
     ("年龄：30", "简历碎片"),
-    ("QQQQ", "字母碎片"),
-    ("@所有人", "系统消息"),
-    ("撤回", "系统消息"),
-    ("2024年12月", "日期格式"),
-    ("3月15日", "日期格式"),
-    ("家政阿姨13800138000", "SEO前缀"),
+    ("2024年12月", "日期时间格式"),
+    ("3月15日", "日期时间格式"),
 ]
 for text, cat in bad_cases:
-    is_ok, matched = _judge_correctness(text, correctness)
-    check(f"'{text}' => bad (cat={cat})", not is_ok,
+    is_ok, matched = _judge_correctness(text, rejection_rules)
+    check(f"'{text}' => bad (cat={cat})", not is_ok and matched == cat,
           f"is_ok={is_ok}, matched={matched}")
 
 good_cases = ["张伟", "王芳", "李经理", "小明123", "阿强"]
 for text in good_cases:
-    is_ok, matched = _judge_correctness(text, correctness)
+    is_ok, matched = _judge_correctness(text, rejection_rules)
     check(f"'{text}' => ok", is_ok, f"is_ok={is_ok}, matched={matched}")
 print()
 
 # ---- Test 5: Empty JSONL dry_run won't corrupt new params ----
 print("=== Test 5: dry_run no corruption ===")
 from skill_self_evolution.config import get_deepseek_config
+from skill_self_evolution.config_loader import ConfigVersionManager
 from skill_self_evolution.deepseek import DeepSeekClient
 from skill_self_evolution.evolver import Evolver
 import skill_self_evolution.evolver as _ev
@@ -163,11 +158,15 @@ async def _test():
     mgr3 = ConfigVersionManager()
     ds = get_deepseek_config()
     client = DeepSeekClient(api_key=ds.api_key, api_base=ds.api_base, model=ds.model)
+    rules_path = Path(
+        "E:/projects/housekeeping_ai_match/backend/config/services/skill/nickname-selector/rules_config.yaml"
+    )
     evolver = Evolver(
         skill_name="nickname-selector",
-        skill_base_dir=Path("E:/projects/housekeeping_ai_match/backend/config/services/skill"),
+        log_dir=log_dir,
+        rules_config_disk_path=rules_path,
         deepseek=client,
-        config_version_manager=mgr3,
+        version_mgr=mgr3,
     )
     proposal = await evolver.evolve(date_str=today, dry_run=True)
     rc = proposal.rules_changes

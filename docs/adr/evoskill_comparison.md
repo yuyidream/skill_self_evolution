@@ -20,7 +20,7 @@
 | **进化对象** | coding agent 的 system prompt + skills 文件 | 业务规则 YAML（rejection_rules / geometry_rules / confidence 阈值 / prompt） |
 | **数据来源** | CSV（question/answer pairs）+ 分类均衡采样 | MySQL JSONL 失败日志（`is_failure=true`） |
 | **评分机制** | Benchmark 打分（`multi_tolerance` / `exact` / `llm` / `harbor`） | 注入式 `benchmark_fn`（业务自行定义，如昵称准确率） |
-| **版本管理** | Git 分支（`program/iter-skill-N`）+ `frontier/*` tags | MySQL 双表（`skill_config` + `skill_config_history`）+ 磁盘 YAML 同步 |
+| **版本管理** | Git 分支（`program/iter-skill-N`）+ `frontier/*` tags | VersionManager + `wx_version_activation` + 磁盘 `rules_config_vN.yaml` |
 | **调用方式** | 开发者 CLI + Python API（`EvoSkill(...).run()`） | `Evolver(skill_name=...).evolve()` 库内调用 |
 | **依赖规模** | 10+ 外部依赖（claude-agent-sdk, opencode-ai, harbor, daytona 等） | 5 个核心依赖（pydantic, httpx, pymysql, ruamel.yaml, structlog） |
 
@@ -40,7 +40,7 @@
 
 | # | 创新项 | 说明 | EvoSkill 是否有 |
 |---|---|---|---|
-| 1 | MySQL + 磁盘双写版本管理 | Git 分支 → MySQL (`skill_config` + `skill_config_history`) 双向同步 | ❌ EvoSkill 用 Git |
+| 1 | VersionManager + 磁盘版本文件 | Git 分支 → `rules_config_vN.yaml` + `wx_version_activation` | ❌ EvoSkill 用 Git |
 | 2 | **自动回滚安全网** | Post-benchmark 分数退步 → `rollback()` 恢复上一版本 | ❌ EvoSkill 只有 discard，无回滚 |
 | 3 | `min_failure_samples` 门控 | 失败样本不足 10 条跳过本轮进化 | ❌ EvoSkill 无样本量判断 |
 | 4 | YAML deep-merge 应用变更 | `ruamel.yaml` 递归合并 + 数值漂移告警 | ❌ EvoSkill 直接写文件 |
@@ -74,7 +74,7 @@
 1. **EvoSkill 为 coding agent benchmark 设计**（SWE-bench, SealQA），不是业务规则进化
 2. **数据结构完全不同**：CSV/Harbor vs MySQL JSONL
 3. **评分体系完全不同**：benchmark 打分 vs 业务准确率
-4. **输出目标完全不同**：.claude/skills/*.md 文件 vs MySQL 双表 + 磁盘 YAML
+4. **输出目标完全不同**：.claude/skills/*.md 文件 vs VersionManager 版本文件 + MySQL 执行日志
 5. **调用模式完全不同**：CLI vs 库内调用
 
 ---

@@ -499,6 +499,7 @@ class SkillExecutor:
             circuit_breaker_threshold=int(af.get("circuit_breaker_threshold", 3)),
             circuit_breaker_cooldown_seconds=float(af.get("circuit_breaker_cooldown_seconds", 60)),
             conservative_mode=bool(af.get("conservative_mode", False)),
+            enabled=bool(af.get("enabled", True)),
         )
         return FallbackConfig(
             validate_timeout_seconds=validated.validate_timeout_seconds,
@@ -507,6 +508,7 @@ class SkillExecutor:
             circuit_breaker_threshold=validated.circuit_breaker_threshold,
             circuit_breaker_cooldown_seconds=validated.circuit_breaker_cooldown_seconds,
             conservative_mode=validated.conservative_mode,
+            enabled=validated.enabled,
         )
 
     def _compute_is_failure(

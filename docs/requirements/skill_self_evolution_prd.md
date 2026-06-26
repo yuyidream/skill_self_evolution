@@ -154,7 +154,7 @@ Admin 面板"创建新版本"和 Evolver "自动进化"都通过同一个 wx_ver
 | 层 | 内容 | 执行策略 |
 |----|------|---------|
 | **逐块过滤层** `_classify()` | 文本规则 + 几何规则 + 头像守卫 | 声明式规则引擎（`rules_config.yaml` + `rule_runner.py`）作为**主分类路径**。`_classify()` 通过 `_get_declarative_rules()` 加载 YAML 规则后传入 `_classify_with_declarative_rules()`，由后者统一执行 drop / 分类。config (NicknameOcrConfig) 阈值优先于 YAML（测试可覆盖），`_starts_with_system_prefix` 仅阻止昵称分类（返回 bubble_text，非 drop），水平位置与头像列守卫保持硬编码。`rules_config.yaml` 不可用时自动降级到纯硬编码。降级逻辑直接写在代码中，无外部参数控制。降级触发条件：
-- `rules_config.yaml` 解析失败 → 降级到 `_classify()` 旧逻辑`_get_declarative_rules()` 支持 MySQL 优先、磁盘 YAML 回退、模块级缓存热加载 |
+- `rules_config.yaml` 解析失败 → 降级到 `_classify()` 旧逻辑；`_get_declarative_rules()` 通过 **VersionManager.load_config("nickname_rules_config")** 读当前激活的 `rules_config_vN.yaml`，失败时回退磁盘 `rules_config.yaml`，模块级缓存热加载 |
 | **结构编排层** | 气泡碎片合并、发言认领、简历卡绑定三步逻辑、orphan 归因，从候选池中选出最终昵称 | 算法流程保持硬编码，**参数**纳入 YAML 配置（见下） |
 
 `rules_config.yaml` 覆盖范围（Evolver 在 `mode=full` 下可自主改进）：
@@ -302,9 +302,15 @@ env文件里的 `enable_nickname_evolution` 参数作为开关，只控制管线
 启动时读取 `enable_nickname_evolution` 参数，为 `true` 时才执行进化流程：
 
 Evolver 先构建训练集和验证集，
-然后读取 JSONL 失败案例，失败案例数量达到阈值后（默认≥10，可配置），让 “Evolver 规则进化AI”（当前接入DeepSeek），根据 `evolve_prompt.yaml` 的提示词，分析当前 `rules_config.yaml` 哪里导致误判，然后优化已有规则或提出新规则。
+然后读取 JSONL 失败案例，失败案例数量达到阈值后（默认≥10，可配置），让 “Evolver 规则进化AI”（当前接入DeepSeek），根据 `evolve_prompt.yaml` 的提示词，分析当前激活的 `rules_config`（从工作文件 `rules_config.yaml` 读取，与 VersionManager 激活版本一致）哪里导致误判，然后优化已有规则或提出新规则。
+
+**规则写入与版本化**（与 §同一套版本文件 一致）：
+1. Evolver 将合并后的 YAML 写入工作文件 `rules_config.yaml`（`_sync_rules_to_disk`）
+2. benchmark 通过后，调用方 `on_rules_applied` → `_sync_evolved_rules_to_version_manager()` 创建 `rules_config_v{N+1}.yaml` 并 `set_active_version(N+1)`（`wx_version_activation` 表）
+3. benchmark 退化时，Evolver 恢复工作文件并调用 `on_rules_rollback()` → VersionManager.rollback()
+
 `evolve_prompt.yaml` 的输入包括：
-- 当前 `rules_config.yaml`
+- 当前 `rules_config.yaml`（工作文件，内容与 VersionManager 激活版本一致）
 - 失败案例的 JSONL 条目（含 `rule_output` / `ai_validation` / `ai_reselection` 等字段）
 - `input_summary` 中由 `enrich_failure` 回调注入的 session 文件全文：
   - `debug_session_derived_json`：OCR 分类结果（blocks、speaker_bands 等）
@@ -601,7 +607,7 @@ AI 按 prompt 对简历-订单匹配进行语义评分（0-22 分），结果在
 
 | 模块 | 关键事件 |
 |------|---------|
-| `config_loader.py` | `skill_config 表确认存在`, `skill_evolution_feedback 表确认存在`, `反馈记录写入`, `配置写入: name type vN`, `配置回滚成功: name type → vN` |
+| `config_loader.py` | `skill_execution_log 表确认存在`, `skill_evolution_feedback 表确认存在`, `反馈记录写入`, `ConfigVersionManager 训练集加载` |
 | `feedback_history.py` | `feedback.append`, `feedback.read`, `feedback.read_empty` |
 | `feedback_descent.py` | `feedback_descent.start`, `.initial`, `.candidate`, `.eval`, `.improved`, `.no_improvement`, `.early_stop`, `.done` |
 | `deepseek.py` | 熔断器冷却/触发/关闭, `DeepSeek 请求失败 (attempt)`, `DeepSeek 响应非 JSON` |
@@ -657,7 +663,7 @@ proposal.failure_count = len(failures)
 
 - Evolver 改 YAML — 框架已实现 `_apply_rules_changes` + `_apply_prompt_changes`
 - Evolver benchmark 验证 — 框架已实现前/后对比 + 退化自动回滚
-- **配置版本管理** — MySQL 双表 `skill_config`（当前版本）+ `skill_config_history`（全量历史），`save()` 写入时自动递增 version 并归档旧版，`rollback(v)` 按版本号恢复。每次替换自动留档，不丢历史。
+- **配置版本管理** — 由业务项目 **VersionManager + `wx_version_activation` + `rules_config_vN.yaml`** 统一管理（见 §同一套版本文件）。框架 `ConfigVersionManager` 仅负责 `skill_execution_log` 与 `skill_evolution_feedback`。
 
 待补：
 
@@ -832,51 +838,48 @@ Evolver 当前只有一个 `evolve()` 方法，只读 JSONL，无 MySQL 依赖�
 
 | 函数 | 位置 | 职责 |
 |---|---|---|
-| `_load_rules_from_mysql()` | 昵称选择处理器 | 每次执行从 MySQL 拉取最新 rules_config |
-| `_seed_mysql_from_disk()` | 昵称选择处理器 | 首次运行时将 disk YAML 写入 MySQL |
-| `_sync_rules_to_disk(yaml)` | `evolver.py::Evolver` | MySQL → 磁盘同步（写入后 + 回滚后） |
+| `_load_rules_from_version_manager()` | 昵称选择处理器 / scan_job | 从 VersionManager 读当前激活 rules_config |
+| `_sync_rules_to_disk(yaml)` | `evolver.py::Evolver` | 写入工作文件 `rules_config.yaml` |
+| `_sync_evolved_rules_to_version_manager()` | `nickname_evolution_scheduler.py` | 创建 `rules_config_v{N+1}.yaml` 并激活 |
+| `on_rules_rollback()` | `nickname_evolution_scheduler.py` | benchmark 退化时 VersionManager.rollback() |
 
 **数据流方向**：
 
-- **读**：MySQL → `run.py::execute()`（每次调用都取最新版）
-- **写**：Evolver → MySQL（版本归档） → disk YAML（同步副本）
-- **回滚**：Evolver → MySQL rollback → 读回旧版 → disk YAML 同步
+- **读**：VersionManager → `run.py` / `scan_job.py` / `benchmark()` / OCR 管线（每次取 `wx_version_activation.active_version` 对应文件）
+- **写**：Evolver → 工作文件 `rules_config.yaml` → benchmark 通过 → `rules_config_v{N+1}.yaml` + 激活
+- **回滚**：Evolver 恢复工作文件 → `on_rules_rollback()` 回退 VersionManager 激活版本
 
-**版本追踪**：MySQL `skill_config_history` 表自动归档每次变更，`skill_config.version` 递增。git 追踪 disk YAML 变更。
+**版本追踪**：磁盘 `rules_config_v1.yaml` … `rules_config_vN.yaml` + `wx_version_activation` 表；git 追踪 YAML 变更。
 
 #### 3.4.7.1 管线消费方的热加载
 
-上述 MySQL → `execute()` 链路解决了 **Skill 旁路** 的实时生效。但 **管线内 `nickname_ocr_simple.py`** 也需消费 `rules_config.yaml`（替代 `_classify()` 旧硬编码），该侧需同步考虑：
-
-**建议方案**（列入开发计划）：
+上述 VersionManager → 生产入口 链路解决了 **Skill 旁路** 与 **OCR 管线** 的实时生效。`nickname_ocr_simple.py` 通过 `_get_declarative_rules()` 读 VersionManager 激活版本（与 §同一套版本文件 一致）。
 
 | 组件 | 当前状态 | 需要 |
 |---|---|---|
-| `nickname_ocr_simple.py` | 硬编码 `_classify()`，不读任何 YAML | 植入 `_load_rules_from_mysql()` 或读磁盘 YAML，支持热刷新 |
-| 扫描器 `SessionBatchScanner` | 每个 session 调一次 `_classify()` | 若 rules 变更频繁（Evolver 每天改），需进程内缓存 + TTL 失效，避免每次读 MySQL |
+| `nickname_ocr_simple.py` | 读 VersionManager / 磁盘 fallback | 保持与 VersionManager 缓存一致 |
+| 扫描器 `SessionBatchScanner` | 每 session 调 `_classify()` | 复用 VersionManager 版本号作缓存 key，变更时自动刷新 |
 
-可复用 `VersionManager` 的 `get_rule_structuring_runtime()` 缓存模式（snapshot key = 版本号，变更时自动刷新），与 `structuring_*_v1` 的热加载机制一致。
-
-#### 3.4.8 扩展执行步骤（correctness_criteria + evolve_prompt + MySQL 同步）
+#### 3.4.8 扩展执行步骤（correctness_criteria + evolve_prompt + VersionManager 同步）
 
 | 序号 | 步骤 | 文件 | 改动说明 | 依赖 |
 |---|---|---|---|---|
-| 10 | rules_config 新增 correctness_criteria | `rules_config.yaml` | 结构化可执行判据：`bad_categories[]`（6 类 + patterns[]）+ `verification_conditions[]`（A→B→C 三条件） | 4 |
-| 11 | run.py 消费 correctness_criteria | `run.py` | `_judge_correctness()` 遍历 bad_categories 做正则匹配；benchmark 改用 criteria 判断 | 10 |
-| 12 | Skill 级 evolve_prompt.yaml | `evolve_prompt.yaml` | 领域知识注入：参考资料链接 + 正确性判据 + 已知坏类别 + 规则类型说明 | — |
-| 13 | 框架 evolve_prompt 解除限制 | `defaults/evolve_prompt.yaml` | 允许新增/修改/删除 correctness_criteria + rejection_rules（不限于数值） | — |
-| 14 | execute() MySQL 为主源 | `run.py` | `_load_rules_from_mysql()` + `_seed_mysql_from_disk()`，Evolver 改动实时生效 | 1 |
-| 15 | Evolver 写 MySQL 同步磁盘 | `evolver.py` | `_sync_rules_to_disk()` — 写入/回滚后同步 disk YAML | 1 |
+| 10 | rules_config 新增 correctness_criteria | `rules_config.yaml` | 结构化可执行判据 | 4 |
+| 11 | run.py 消费 correctness_criteria | `run.py` | `_judge_correctness()` + benchmark | 10 |
+| 12 | Skill 级 evolve_prompt.yaml | `evolve_prompt.yaml` | 领域知识注入 | — |
+| 13 | 框架 evolve_prompt 解除限制 | `defaults/evolve_prompt.yaml` | 允许增删 rejection_rules | — |
+| 14 | execute() VersionManager 为主源 | `run.py` | `_load_rules_from_version_manager()` | 1 |
+| 15 | Evolver 写工作文件 + VersionManager | `evolver.py` + scheduler | `_sync_rules_to_disk` + `_sync_evolved_rules_to_version_manager` | 1 |
 
 #### 3.4.9 扩展验收标准
 
 | 编号 | 验收项 | 通过标准 | 关联步骤 |
 |---|---|---|---|
 | V16 | correctness_criteria 可执行 | `_judge_correctness()` 对 10 条正/反例全部判断正确 | 10+11 |
-| V17 | Evolver 能产出改进建议 | 64 条 real_failure_cases 输入 → Evolver 产出≥1 条新 rejection_rule 或 bad_category | 12+13 |
-| V18 | MySQL 为主源实时生效 | Evolver dry_run=False 写入 MySQL → 下一次 execute() 读到新配置 | 14+15 |
-| V19 | 写 MySQL 同步磁盘 | Evolver 写入后 disk YAML 内容与 MySQL 一致 | 15 |
-| V20 | 磁盘种子可回读 | 清空 MySQL 该 Skill 配置 → execute() 首次调用从 disk YAML 自动恢复 | 14 |
+| V17 | Evolver 能产出改进建议 | 64 条 real_failure_cases 输入 → Evolver 产出≥1 条新 rejection_rule | 12+13 |
+| V18 | VersionManager 为主源实时生效 | Evolver dry_run=False 激活 v{N+1} → 下一次 execute() 读到新配置 | 14+15 |
+| V19 | 工作文件与版本文件一致 | 激活后 `rules_config.yaml` 与 `rules_config_vN.yaml` 内容一致 | 15 |
+| V20 | 磁盘 fallback | VersionManager 不可用时 execute() 回退 `rules_config.yaml` | 14 |
 
 #### 3.4.10 enrich_failure 回调测试用例
 

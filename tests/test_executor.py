@@ -18,6 +18,14 @@ def _write_candidates(candidates: list[str], dir: str, name: str = "candidates.j
     return str(path)
 
 
+def _rules_config(rejection_rules: list[dict] | None = None) -> dict:
+    """规则层单测配置：关闭 AI，避免依赖外部 DeepSeek API。"""
+    return {
+        "rejection_rules": rejection_rules or [],
+        "ai_fallback": {"enabled": False},
+    }
+
+
 @pytest.mark.asyncio
 class TestSkillExecutor:
     """SkillExecutor 集成测试"""
@@ -31,21 +39,21 @@ class TestSkillExecutor:
     async def test_rule_basic(self, executor, tmp_path):
         """基础规则执行"""
         path = _write_candidates(["张三", "李四"], str(tmp_path))
-        result = await executor.run(path, rules_config={"rejection_rules": []})
+        result = await executor.run(path, rules_config=_rules_config())
         assert result.source == "rule"
         assert result.result["result"] in ("张三", "李四")
 
     async def test_rule_drop_system_prefix(self, executor, tmp_path):
         """rule_runner drop 掉系统前缀文本"""
         path = _write_candidates(["张三", "警惕不实营销信息"], str(tmp_path))
-        rules = {"rejection_rules": [{"type": "regex", "pattern": "^警惕", "action": "drop"}]}
+        rules = _rules_config([{"type": "regex", "pattern": "^警惕", "action": "drop"}])
         result = await executor.run(path, rules_config=rules)
         assert result.result["result"] == "张三"
 
     async def test_rule_remove_prefix(self, executor, tmp_path):
         """rule_runner remove_prefix 去前缀"""
         path = _write_candidates(["姓名：张三"], str(tmp_path))
-        rules = {"rejection_rules": [{"type": "regex", "pattern": "^姓名[：:]", "action": "remove_prefix"}]}
+        rules = _rules_config([{"type": "regex", "pattern": "^姓名[：:]", "action": "remove_prefix"}])
         result = await executor.run(path, rules_config=rules)
         assert result.result["result"] == "张三"
 
@@ -76,7 +84,7 @@ class TestSkillExecutor:
             monkeypatch.setenv("SKILL_LOG_DIR", logdir)
             executor = SkillExecutor(skill_name="enhance-test", ai_role="enhancement")
             path = _write_candidates(["张三"], str(tmp_path))
-            result = await executor.run(path, rules_config={"rejection_rules": []})
+            result = await executor.run(path, rules_config=_rules_config())
             assert result.source == "rule"
 
     async def test_invalid_json_rejected(self, executor, tmp_path):

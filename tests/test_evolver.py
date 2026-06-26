@@ -238,25 +238,25 @@ class TestEvolveFlowTrainingGoldenSet:
     """Evolver.evolve() 中训练集/验证集注入到 proposal 并传递到 feedback"""
 
     def _make_mock_evolver(self, log_dir: Path):
-        """构造一个 mock Evolver，跳过 DeepSeek / benchmark / 文件写入。
-
-        load_failure_logs / load_failure_logs_by_date / load_training_set 抛出异常，强制回退 JSONL 路径。
-        """
+        """构造一个 mock Evolver，跳过 DeepSeek / benchmark / 文件写入。"""
         mgr = MagicMock()
-        # 强制 MySQL 失败 → JSONL 回退
         mgr.load_failure_logs.side_effect = Exception("MySQL not available")
         mgr.load_failure_logs_by_date.side_effect = Exception("MySQL not available")
         mgr.ensure_execution_log_table.side_effect = Exception("MySQL not available")
         mgr.load_training_set.side_effect = Exception("MySQL not available")
         mgr.get_golden_set_size.return_value = 7
         mgr.get_next_evolution_round.return_value = 3
-        mgr.load_raw.return_value = "# placeholder"
-        mgr.load_version.return_value = 2
+
+        rules_path = log_dir / "rules_config.yaml"
+        rules_path.write_text("nickname_thresholds:\n  min_confidence: 0.7\n", encoding="utf-8")
 
         evolver = Evolver(
             skill_name="test-skill",
             log_dir=log_dir,
+            rules_config_disk_path=rules_path,
             version_mgr=mgr,
+            get_rules_version=lambda: "2",
+            on_rules_applied=lambda _c: "3",
         )
         evolver._deepseek = MagicMock()
         evolver.benchmark_fn = MagicMock(return_value=(5, 7, []))
@@ -353,7 +353,7 @@ class TestEvolveFlowTrainingGoldenSet:
                 "rules_changes": {"nickname_thresholds": {"min_confidence": 0.5}},
             })
             evolver.evolve_toml = {"evolve": {"auto_modify": {"rules_config": {"mode": "full"}}}}
-            mgr.save.return_value = 3  # version_after
+            evolver.benchmark_fn = MagicMock(return_value=(6, 7, []))
 
             proposal = await evolver.evolve(dry_run=False, date_str="2026-06-18")
 
@@ -362,23 +362,6 @@ class TestEvolveFlowTrainingGoldenSet:
         call_kwargs = mgr.save_feedback.call_args.kwargs
         assert call_kwargs["version_before"] == 2
         assert call_kwargs["version_after"] == 3
-
-
-# ── ConfigVersionManager.load_version ──
-
-
-class TestConfigVersionManagerLoadVersion:
-    """ConfigVersionManager.load_version：获取当前激活版本的版本号"""
-
-    def test_load_version_on_mock(self):
-        mgr = MagicMock()
-        mgr.load_version.return_value = 4
-        assert mgr.load_version("nickname-selector", "rules_config") == 4
-
-    def test_load_version_returns_none_when_not_found(self):
-        mgr = MagicMock()
-        mgr.load_version.return_value = None
-        assert mgr.load_version("unknown-skill", "rules_config") is None
 
 
 # ── ConfigVersionManager.get_golden_set_size ──

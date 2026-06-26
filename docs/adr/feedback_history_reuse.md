@@ -35,19 +35,28 @@ append_feedback(
 
 ## 二、我们已有的基础设施
 
-### 2.1 MySQL skill_config_history 表已存在
+### 2.1 进化反馈表 `skill_evolution_feedback`
+
+配置版本历史由 housekeeping **VersionManager** 的 `rules_config_vN.yaml` 文件链承担；进化过程摘要写入下表。
 
 ```sql
-skill_config_history (
-    id, skill_name, config_type, content, version, archived_at
+skill_evolution_feedback (
+    id, skill_name, evolution_round, outcome, proposal_summary,
+    benchmark_before_pass, benchmark_before_total,
+    benchmark_after_pass, benchmark_after_total,
+    failure_count, analysis_raw,
+    version_before, version_after,  -- 对应 VersionManager 激活版本号
+    created_at
 )
 ```
 
-每次 `save()` 会自动归档旧版本。但该表**不记录**：
-- 这次改动是谁提出的（proposal 描述）
-- 改动理由（justification）
-- 改动效果（分数变化 + outcome）
-- 进化批次（哪一轮进化）
+该表记录：
+- 这次改动提出的 rules_changes / prompt_changes 摘要
+- benchmark 前后通过数
+- outcome（improved / discarded / rolled_back）
+- 进化前后 VersionManager 版本号
+
+**不记录** YAML 全文（全文在磁盘 `rules_config_vN.yaml`）。
 
 ### 2.2 Evolver 已有 proposal 数据结构
 
