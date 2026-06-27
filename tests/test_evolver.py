@@ -363,6 +363,58 @@ class TestEvolveFlowTrainingGoldenSet:
         assert call_kwargs["version_before"] == 2
         assert call_kwargs["version_after"] == 3
 
+    @pytest.mark.asyncio
+    async def test_rejection_rules_count_decrease_triggers_rollback(self):
+        """guard.require_rejection_rules_count_not_decrease：条数减少则回滚，不跑 benchmark。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_dir = Path(tmp)
+            _write_jsonl(log_dir, "2026-06-18", [_make_failure(f"t{i}") for i in range(10)])
+
+            evolver, mgr = self._make_mock_evolver(log_dir)
+            before_rules = (
+                "rejection_rules:\n"
+                "  - type: regex\n    pattern: '^a$'\n    action: drop\n"
+                "    category: test\n    description: r1\n"
+                "  - type: regex\n    pattern: '^b$'\n    action: drop\n"
+                "    category: test\n    description: r2\n"
+            )
+            after_rules = (
+                "rejection_rules:\n"
+                "  - type: regex\n    pattern: '^a$'\n    action: drop\n"
+                "    category: test\n    description: r1\n"
+            )
+            rules_path = log_dir / "rules_config.yaml"
+            rules_path.write_text(before_rules, encoding="utf-8")
+
+            evolver._deepseek.chat_json = AsyncMock(return_value={
+                "rules_changes": {"rejection_rules": "truncate"},
+            })
+            evolver.evolve_toml = {
+                "evolve": {
+                    "auto_modify": {"rules_config": {"mode": "full"}},
+                    "guard": {"require_rejection_rules_count_not_decrease": True},
+                }
+            }
+            evolver.benchmark_fn = MagicMock(return_value=(7, 7, []))
+            rollback = MagicMock()
+            evolver._on_rules_rollback = rollback
+
+            original_apply = evolver._apply_rules_changes
+
+            def _fake_apply(_current, _changes, _max_pct):
+                return after_rules
+
+            evolver._apply_rules_changes = _fake_apply
+
+            proposal = await evolver.evolve(dry_run=False, date_str="2026-06-18")
+
+            assert proposal.rolled_back is True
+            assert proposal.applied is False
+            rollback.assert_called_once()
+            assert evolver.benchmark_fn.call_count == 1  # 仅进化前 benchmark，条数 guard 跳过进化后
+            assert proposal.benchmark_after == (0, 0, [])
+            assert rules_path.read_text(encoding="utf-8") == before_rules
+
 
 # ── ConfigVersionManager.get_golden_set_size ──
 

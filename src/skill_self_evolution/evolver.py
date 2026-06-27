@@ -551,6 +551,26 @@ class Evolver:
                     except Exception as e:
                         logger.warning("Evolver [%s] on_rules_applied 失败: %s", self.skill_name, e)
                 logger.info("Evolver [%s] rules_config 已写入工作文件", self.skill_name)
+                if guard.get("require_rejection_rules_count_not_decrease", False):
+                    decreased, before_n, after_n = self._rejection_rules_count_decreased(
+                        backup_rules, proposal.rules_text
+                    )
+                    if decreased:
+                        logger.warning(
+                            "Evolver [%s] rejection_rules 条数减少 (%d → %d)，自动回滚",
+                            self.skill_name,
+                            before_n,
+                            after_n,
+                        )
+                        self._rollback_applied_rules(
+                            backup_rules,
+                            proposal,
+                            mode=mode,
+                            auto_cfg=auto_cfg,
+                        )
+                        proposal.rolled_back = True
+                        proposal.applied = False
+                        require_bench = False
             if proposal.prompt_text and auto_cfg.get("prompt", False) and mode in ("both", "prompt_only"):
                 proposal.prompt_text, lint_errors = lint_and_fix_yaml(proposal.prompt_text)
                 if lint_errors:
@@ -574,19 +594,19 @@ class Evolver:
                         pass_after, proposal.benchmark_after[1],
                     )
                     if proposal.rules_text and auto_cfg.get("rules_config", False) and mode in ("both", "rules_only"):
-                        self._sync_rules_to_disk(backup_rules)
-                        if self._on_rules_rollback:
-                            try:
-                                self._on_rules_rollback()
-                            except Exception as e:
-                                logger.warning("Evolver [%s] on_rules_rollback 失败: %s", self.skill_name, e)
+                        self._rollback_applied_rules(
+                            backup_rules,
+                            proposal,
+                            mode=mode,
+                            auto_cfg=auto_cfg,
+                        )
                     if proposal.prompt_text and auto_cfg.get("prompt", False) and mode in ("both", "prompt_only"):
                         pass
                     proposal.rolled_back = True
                     proposal.applied = False
                 else:
                     proposal.applied = True
-            else:
+            elif not proposal.rolled_back:
                 proposal.applied = applied
 
             # ── 记录反馈历史 ──
@@ -630,6 +650,45 @@ class Evolver:
                     logger.warning("Evolver [%s] 进化状态更新失败: %s", self.skill_name, e)
 
         return proposal
+
+    @staticmethod
+    def _rejection_rules_list_len(yaml_text: str) -> int:
+        if not (yaml_text or "").strip():
+            return 0
+        try:
+            data = YAML(typ="safe").load(yaml_text) or {}
+        except Exception:
+            return 0
+        rules = data.get("rejection_rules") if isinstance(data, dict) else None
+        return len(rules) if isinstance(rules, list) else 0
+
+    @classmethod
+    def _rejection_rules_count_decreased(
+        cls, before_yaml: str, after_yaml: str
+    ) -> tuple[bool, int, int]:
+        before_n = cls._rejection_rules_list_len(before_yaml)
+        after_n = cls._rejection_rules_list_len(after_yaml)
+        return after_n < before_n, before_n, after_n
+
+    def _rollback_applied_rules(
+        self,
+        backup_rules: str,
+        proposal: "EvolveProposal",
+        *,
+        mode: str,
+        auto_cfg: dict[str, Any],
+    ) -> None:
+        """回滚已写入磁盘的 rules_config（含 VersionManager 激活版本）。"""
+        if not (proposal.rules_text and auto_cfg.get("rules_config", False)):
+            return
+        if mode not in ("both", "rules_only"):
+            return
+        self._sync_rules_to_disk(backup_rules)
+        if self._on_rules_rollback:
+            try:
+                self._on_rules_rollback()
+            except Exception as e:
+                logger.warning("Evolver [%s] on_rules_rollback 失败: %s", self.skill_name, e)
 
     def _load_rules_yaml_from_disk(self) -> str:
         if not self._rules_disk_path:
