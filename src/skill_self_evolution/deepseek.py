@@ -8,6 +8,7 @@ skill-engine DeepSeekClient（熔断、重试、JSON 解析）。
 import asyncio
 import json
 import os
+import re
 import sys
 import traceback
 from skill_self_evolution.logging import get_logger
@@ -260,14 +261,62 @@ class DeepSeekClient:
         """发送请求并将响应解析为 JSON dict。解析失败时返回空 dict。"""
         resp = await self.chat(messages, temperature, max_tokens, timeout)
         content = resp.content.strip()
-        if content.startswith("```"):
+
+        # ── 第一步：剥离 markdown 代码块（```json / ```JSON / ```） ──
+        md_match = re.search(r'```(?:json|JSON)?\s*\n(.*?)\n\s*```', content, re.DOTALL)
+        if md_match:
+            content = md_match.group(1).strip()
+        elif content.startswith("```"):
             lines = content.split("\n")
-            content = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+            content = "\n".join(lines[1:-1] if len(lines) > 1 and lines[-1].strip() == "```" else lines[1:])
+
+        # ── 第二步：直接 JSON 解析 ──
         try:
             return json.loads(content)
         except json.JSONDecodeError:
-            logger.warning("DeepSeek 响应非 JSON: %s", content[:200])
-            return {}
+            pass
+
+        # ── 第三步：括号匹配提取最外层 JSON 对象 ──
+        first_brace = content.find("{")
+        if first_brace != -1:
+            depth = 0
+            in_string = False
+            escape_next = False
+            end = -1
+            for i, ch in enumerate(content[first_brace:], start=first_brace):
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == "\\":
+                    escape_next = True
+                    continue
+                if ch == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i
+                        break
+            if end != -1:
+                candidate = content[first_brace : end + 1]
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    pass
+
+        # ── 第四步：记录完整响应用于诊断 ──
+        logger.warning(
+            "DeepSeek JSON 解析失败 (len=%d, finish=%s): %s...",
+            len(content),
+            resp.finish_reason,
+            content[:500],
+        )
+        return {}
 
     async def chat_stream(
         self,

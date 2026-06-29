@@ -543,6 +543,18 @@ class Evolver:
                 proposal.rules_text, lint_errors = lint_and_fix_yaml(proposal.rules_text)
                 if lint_errors:
                     logger.warning("Evolver [%s] rules_config lint issues: %s", self.skill_name, lint_errors)
+                # ★ 写入前强制校验：禁止删除节/字段，禁止缩减 rejection_rules
+                errors = self._validate_rules_preservation(backup_rules, proposal.rules_text)
+                if errors:
+                    logger.warning(
+                        "Evolver [%s] rules_config 校验失败 (禁止删除): %s",
+                        self.skill_name,
+                        errors,
+                    )
+                    proposal.applied = False
+                    proposal.rolled_back = True
+                    require_bench = False
+                    return proposal
                 self._sync_rules_to_disk(proposal.rules_text)
                 if self._on_rules_applied:
                     try:
@@ -669,6 +681,45 @@ class Evolver:
         before_n = cls._rejection_rules_list_len(before_yaml)
         after_n = cls._rejection_rules_list_len(after_yaml)
         return after_n < before_n, before_n, after_n
+
+    @staticmethod
+    def _validate_rules_preservation(before_yaml: str, after_yaml: str) -> list[str]:
+        """校验进化后的 YAML 未删除任何节或字段，未缩减 rejection_rules 条目。
+
+        在 _sync_rules_to_disk 之前调用，发现问题时拒绝写入并回滚。
+        Returns: 错误列表（空列表表示通过）
+        """
+        errors = []
+        try:
+            before = yaml_safe.load(before_yaml) or {}
+            after = yaml_safe.load(after_yaml) or {}
+        except Exception as e:
+            return [f"YAML 解析失败: {e}"]
+
+        # 1. 检查顶级节不能删除
+        for section in before:
+            if section not in after:
+                errors.append(f"禁止删除节: {section}")
+
+        # 2. 检查 rejection_rules 条目数不能减少
+        before_rules = before.get("rejection_rules", [])
+        after_rules = after.get("rejection_rules", [])
+        if isinstance(before_rules, list) and isinstance(after_rules, list):
+            if len(after_rules) < len(before_rules):
+                errors.append(
+                    f"rejection_rules 条目数减少: {len(before_rules)} → {len(after_rules)}"
+                )
+
+        # 3. 检查每个 dict 节的字段不能删除
+        for section in before:
+            if section not in after:
+                continue
+            if isinstance(before[section], dict) and isinstance(after[section], dict):
+                for key in before[section]:
+                    if key not in after[section]:
+                        errors.append(f"节 {section} 缺少字段: {key}")
+
+        return errors
 
     def _rollback_applied_rules(
         self,
