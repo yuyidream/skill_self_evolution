@@ -719,6 +719,51 @@ class Evolver:
                     if key not in after[section]:
                         errors.append(f"节 {section} 缺少字段: {key}")
 
+        # 4. 检查 dict 内列表值不能缩减
+        for section in before:
+            if section not in after:
+                continue
+            if not isinstance(before[section], dict):
+                continue
+            if not isinstance(after[section], dict):
+                continue
+            for key in before[section]:
+                if key not in after[section]:
+                    continue
+                before_val = before[section][key]
+                after_val = after[section][key]
+                if isinstance(before_val, list) and isinstance(after_val, list):
+                    if len(after_val) < len(before_val):
+                        errors.append(
+                            f"节 {section}.{key} 列表缩减: {len(before_val)} → {len(after_val)}"
+                        )
+
+        # 5. 检查 rejection_rules 已有条目未被删除（按 pattern 匹配）
+        if isinstance(before_rules, list) and isinstance(after_rules, list):
+            # 构建 after 中所有 pattern 的集合
+            after_patterns = set()
+            for rule in after_rules:
+                if isinstance(rule, dict):
+                    p = rule.get("pattern", "")
+                    t = rule.get("type", "")
+                    after_patterns.add((t, p))
+            # 检查 before 中的每条是否在 after 中存在
+            for rule in before_rules:
+                if isinstance(rule, dict):
+                    p = rule.get("pattern", "")
+                    t = rule.get("type", "")
+                    if (t, p) not in after_patterns:
+                        # 再用 JSON 序列化做宽松匹配
+                        rule_fp = json.dumps(rule, sort_keys=True, ensure_ascii=False)
+                        found = False
+                        for ar in after_rules:
+                            if isinstance(ar, dict) and json.dumps(ar, sort_keys=True, ensure_ascii=False) == rule_fp:
+                                found = True
+                                break
+                        if not found:
+                            desc = rule.get("description", p)
+                            errors.append(f"rejection_rules 已有条目被删除: {desc}")
+
         return errors
 
     def _rollback_applied_rules(
