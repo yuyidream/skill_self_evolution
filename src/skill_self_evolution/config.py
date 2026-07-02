@@ -8,14 +8,16 @@ DeepSeek API 与数据库配置 — 通用，不绑定任何业务项目。
 
 import os
 
-from dotenv import load_dotenv
-
 from pydantic import BaseModel, Field
 
 # ═══════════════════════════════════════════════════════════════
 # 模块加载时自动将 .env 注入 os.environ，使所有脚本无需手动 set
 # ═══════════════════════════════════════════════════════════════
-load_dotenv()  # 优先当前工作目录的 .env；容器内由 docker-compose 注入覆盖
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # 优先当前工作目录的 .env；容器内由 docker-compose 注入覆盖
+except ImportError:
+    pass  # python-dotenv 未安装时静默跳过，依赖系统环境变量
 
 __all__ = ["DeepSeekEnvConfig", "DbConfig", "get_deepseek_config", "get_db_config"]
 
