@@ -365,7 +365,10 @@ class TestEvolveFlowTrainingGoldenSet:
 
     @pytest.mark.asyncio
     async def test_rejection_rules_count_decrease_triggers_rollback(self):
-        """guard.require_rejection_rules_count_not_decrease：条数减少则回滚，不跑 benchmark。"""
+        """
+        rejection_rules 条数减少被 _validate_rules_preservation 提前拦截，
+        在写入磁盘前就回滚，不跑 benchmark。
+        """
         with tempfile.TemporaryDirectory() as tmp:
             log_dir = Path(tmp)
             _write_jsonl(log_dir, "2026-06-18", [_make_failure(f"t{i}") for i in range(10)])
@@ -399,8 +402,6 @@ class TestEvolveFlowTrainingGoldenSet:
             rollback = MagicMock()
             evolver._on_rules_rollback = rollback
 
-            original_apply = evolver._apply_rules_changes
-
             def _fake_apply(_current, _changes, _max_pct):
                 return after_rules
 
@@ -408,10 +409,11 @@ class TestEvolveFlowTrainingGoldenSet:
 
             proposal = await evolver.evolve(dry_run=False, date_str="2026-06-18")
 
+            # _validate_rules_preservation 提前拦截，未写入磁盘，无需 rollback 回调
             assert proposal.rolled_back is True
             assert proposal.applied is False
-            rollback.assert_called_once()
-            assert evolver.benchmark_fn.call_count == 1  # 仅进化前 benchmark，条数 guard 跳过进化后
+            rollback.assert_not_called()
+            assert evolver.benchmark_fn.call_count == 1  # 仅进化前 benchmark
             assert proposal.benchmark_after == (0, 0, [])
             assert rules_path.read_text(encoding="utf-8") == before_rules
 
